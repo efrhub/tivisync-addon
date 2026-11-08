@@ -1,0 +1,50 @@
+name: Family Planner
+version: "3.0.0"
+slug: family_planner
+description: Household chores, schedules, dinners and shopping list for the family
+url: https://github.com/efrhub/tivisync-addon
+arch:
+  - aarch64
+  - amd64
+  - armv7
+init: false
+startup: application
+boot: auto
+ports:
+  3100/tcp: 3100
+ports_description:
+  3100/tcp: Family Planner web app
+webui: http://[HOST]:[PORT:3100]
+ingress: true
+ingress_port: 3100
+panel_icon: mdi:calendar-check
+panel_title: Family Planner
+panel_admin: false
+homeassistant_api: true
+map:
+  - share:rw
+options:
+  tz: Europe/London
+  trust_proxy: false
+  admin_email: ""
+  admin_password: ""
+  speakers:
+    - "Joshua=media_player.josh_speaker"
+    - "Shakira=media_player.shakira_bedroom"
+  speak_after_minutes: 60
+  tts_entity: tts.home_assistant_cloud
+  tts_language: en-GB
+  tv_remind_minutes: 30
+  tivisync_url: http://e53481c0-tivisync:8080
+schema:
+  tz: str
+  trust_proxy: bool
+  admin_email: str?
+  admin_password: password?
+  speakers:
+    - str
+  speak_after_minutes: int(15,600)
+  tts_entity: str
+  tts_language: str?
+  tv_remind_minutes: int(0,240)
+  tivisync_url: url
