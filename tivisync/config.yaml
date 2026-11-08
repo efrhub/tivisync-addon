@@ -1,5 +1,5 @@
 name: TiviSync
-version: "1.8.1"
+version: "1.8.2"
 slug: tivisync
 url: https://github.com/efrhub/tivisync-addon
 description: Sync server + parental controls for the TiviSync Android TV IPTV app
@@ -29,6 +29,7 @@ options:
   tmdb_api_key: ""
   chart_region: GB
   remote_url: ""
+  doorbell_entity: binary_sensor.doorbell_visitor
 schema:
   admin_password: password?
   tz: str
@@ -41,3 +42,4 @@ schema:
   tmdb_api_key: password?
   chart_region: str?
   remote_url: str?
+  doorbell_entity: str?
