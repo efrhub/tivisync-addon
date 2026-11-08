@@ -282,6 +282,9 @@ async function loadTvs() {
      <textarea id="vcfg" rows="5" style="width:100%;font-family:monospace;font-size:12px;border-radius:10px;background:#0b1220;color:var(--text);border:1px solid var(--line);padding:8px" placeholder="[Interface]\nPrivateKey = …\nAddress = …\n\n[Peer]\nPublicKey = …\nEndpoint = …"></textarea>
      <div class="row" style="margin-top:10px"><button class="primary" id="vsave">Save VPN settings</button>${vpn.hasDefaultConfig ? '<button class="bad small" id="vclr">Remove default config</button>' : ''}</div></div>` +
     `<div class="card"><h3>🌍 Away from home</h3><div id="remBox" class="muted">Checking…</div></div>` +
+    `<div class="card"><h3>📢 Doorbell &amp; announcements</h3><p class="muted">When the doorbell rings, or Home Assistant sends the event <b>tivisync_announce</b> with a <b>message</b>, every TV pauses, shows it and reads it out.</p>
+      <div id="annBox" class="muted">Checking…</div>
+      <div class="row" style="margin-top:8px"><input id="annMsg" placeholder="Message to show on the TVs" style="flex:1"><button class="small" id="annSend">Send</button><button class="small" id="annBell">🔔 Test doorbell</button></div></div>` +
     `<div class="card"><h3>📲 App updates</h3><div id="appBox" class="muted">Loading…</div>
      <div class="row" style="margin-top:10px"><button class="small primary" id="appCheck">Check GitHub now</button>
      <label class="btn small" style="margin:0;cursor:pointer">Upload APK<input type="file" id="appFile" accept=".apk" style="display:none"></label></div>
@@ -304,6 +307,9 @@ async function loadTvs() {
       (a.tokenSet === false ? '<br>⚠️ No GitHub token set – add <b>github_token</b> in the add-on Configuration, or upload an APK here.' : '');
   };
   api('GET', '/api/admin/app').then(showApp).catch(() => {});
+  api('GET', '/api/admin/announce').then((h) => { $('#annBox').innerHTML = h.connected ? `✅ Listening to Home Assistant${h.doorbell ? ` · doorbell <b>${esc(h.doorbell)}</b>` : ''}` : `⚠️ Not linked to Home Assistant${h.error ? ' – ' + esc(h.error) : ''} (test buttons still work)`; }).catch(() => {});
+  $('#annSend').onclick = async () => { const m = $('#annMsg').value.trim(); if (!m) return; await api('POST', '/api/admin/announce', { message: m }); $('#annMsg').value = ''; toast('Sent to the TVs'); };
+  $('#annBell').onclick = async () => { await api('POST', '/api/admin/announce', { kind: 'doorbell' }); toast('Doorbell sent to the TVs'); };
   api('GET', '/api/admin/remote').then((r) => { $('#remBox').innerHTML = r.url
       ? `Phones and TVs use <b>${esc(r.url.replace('/api/tivisync', ''))}</b> when they can't reach your home network (${esc(r.source || '')}). Needs the TiviSync integration installed in Home Assistant.${r.error ? '<br>⚠️ ' + esc(r.error) : ''}`
       : `No external address found${r.error ? ': ' + esc(r.error) : ''}.`; }).catch((e) => { $('#remBox').textContent = e.message; });
