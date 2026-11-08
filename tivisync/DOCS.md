@@ -20,3 +20,9 @@ event: tivisync_announce
 event_data:
   message: "Dinner is ready"
 ```
+
+## More TV time and checking extra jobs
+
+When a child's TV time runs out they can ask for more on the TV. Adults get an alert on their phones (the Home Assistant app, set in **notify_services**, e.g. `mobile_app_home_47`) with +30 min / +1 hour / No, and a pop-up on any TV where an adult profile is signed in with +15 / +30 / +1 hour / No. The first answer wins and the other alerts disappear.
+
+Family Planner uses the same alerts to check extra jobs, and adds TV time for chores that are done (event `tivisync_bonus` with `profile` and `minutes`).
