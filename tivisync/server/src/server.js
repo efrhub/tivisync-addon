@@ -772,6 +772,25 @@ function currentAnnouncement(profile = null) {
   }
   return null;
 }
+// Today's reminders for a profile (sent by Family Planner as tivisync_announce with daily: true). They pop up once,
+// on that profile's first sign-in of the day; a later update the same day is kept but not shown again.
+const dailyNotes = new Map(); // profile (id or name, lower case) -> { date, title, message }
+function setDailyNote(profile, d) {
+  const key = String(profile || '').trim().toLowerCase();
+  if (!key) return;
+  if (!String(d.message || '').trim()) { dailyNotes.delete(key); return; }
+  dailyNotes.set(key, { date: String(d.date || today()), title: String(d.title || '📅 Today').slice(0, 80), message: String(d.message).slice(0, 500) });
+}
+function dailyFor(profile) {
+  if (!profile) return null;
+  const n = dailyNotes.get(String(profile.id)) || dailyNotes.get(String(profile.name || '').toLowerCase());
+  const day = today();
+  if (!n || n.date !== day) return null;
+  const key = `daily_seen_${profile.id}`;
+  if (getSetting(key) === day) return null;
+  setSetting(key, day);
+  return { id: `daily-${profile.id}-${day}`, kind: 'message', at: now(), title: n.title, message: n.message, pause: false, speak: false, ageMs: 0 };
+}
 function profileOnDevice(req, deviceId) {
   const pt = req.headers['x-profile-token'];
   const s = pt && db.prepare('SELECT profile_id FROM profile_sessions WHERE token = ? AND device_id = ?').get(pt, deviceId);
@@ -800,6 +819,7 @@ function startHaListener() {
         const e = m.event;
         if (e.event_type === 'tivisync_announce') {
           const d = e.data || {};
+          if (d.daily) { setDailyNote(d.profile, d); return; }
           announce(d.kind === 'doorbell' ? 'doorbell' : 'message', d.message, { title: d.title, pause: d.pause, speak: d.speak, profile: d.profile });
         } else if (e.variables?.trigger) {
           announce('doorbell', '');
@@ -822,6 +842,7 @@ route('GET', '/api/internal/profiles', 'none', async (req) => {
 route('GET', '/api/admin/announce', 'admin', async () => ({ ...haLive, latest: currentAnnouncement() }));
 route('POST', '/api/admin/announce', 'admin', async (req, b) => {
   const kind = b.kind === 'doorbell' ? 'doorbell' : 'message';
+  if (b.daily) { setDailyNote(b.profile, b); return { ok: true }; }
   if (kind === 'message' && !String(b.message || '').trim()) throw new HttpError(400, 'Type a message to send');
   return announce(kind, b.message, { title: b.title, pause: b.pause, profile: b.profile });
 });
@@ -1321,7 +1342,8 @@ route('POST', '/api/tv/handoff', 'profile', async (req, b, p, { profile, device 
 // Polled by every TV every few seconds. Returns (and clears) a pending handoff. Because the sender was already
 // signed in to that profile, the target TV is given a session for the same profile so it can resume straight away.
 route('GET', '/api/tv/handoff', 'device', async (req, b, p, ctx) => {
-  const announcement = currentAnnouncement(profileOnDevice(req, ctx.device.id));
+  const signedIn = profileOnDevice(req, ctx.device.id);
+  const announcement = currentAnnouncement(signedIn) || dailyFor(signedIn);
   const h = handoffs.get(ctx.device.id);
   if (!h) return { handoff: null, partyInvite: partyInviteFor(ctx.device.id), announcement };
   handoffs.delete(ctx.device.id);
