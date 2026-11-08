@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<title>TiviSync Parent</title>
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--line:#334155;--text:#e2e8f0;--muted:#94a3b8;--accent:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);padding-bottom:calc(70px + env(safe-area-inset-bottom))}
+header{position:sticky;top:0;z-index:5;background:var(--bg);padding:14px 16px 10px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}
+header h1{font-size:18px;margin:0}
+main{padding:12px 16px;max-width:720px;margin:0 auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
+.card h3{margin:0 0 8px;font-size:16px}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.spread{justify-content:space-between}
+.muted{color:var(--muted);font-size:13px}
+.avatar{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;font-weight:700;flex:none}
+button,.btn{border:0;border-radius:10px;padding:9px 14px;font:inherit;font-weight:600;background:var(--line);color:var(--text);cursor:pointer}
+button.primary{background:var(--accent);color:#fff}
+button.ok{background:var(--ok);color:#052e16}
+button.bad{background:var(--bad);color:#fff}
+button.small{padding:6px 10px;font-size:13px}
+input,select{width:100%;padding:10px;border-radius:10px;border:1px solid var(--line);background:#0b1220;color:var(--text);font:inherit}
+label{display:block;margin:10px 0 4px;font-size:13px;color:var(--muted)}
+.bar{height:8px;background:#0b1220;border-radius:6px;overflow:hidden;margin-top:6px}
+.bar>div{height:100%;background:var(--ok)}
+.bar.warn>div{background:var(--warn)} .bar.bad>div{background:var(--bad)}
+nav{position:fixed;bottom:0;left:0;right:0;background:#0b1220;border-top:1px solid var(--line);display:flex;padding-bottom:env(safe-area-inset-bottom)}
+nav button{flex:1;background:none;border-radius:0;padding:12px 0;color:var(--muted);font-size:12px}
+nav button.active{color:var(--accent)}
+.pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;background:var(--line)}
+.pill.live{background:#14532d;color:#86efac}
+.code{font-size:40px;letter-spacing:8px;font-weight:800;text-align:center;margin:10px 0}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.chart{display:flex;align-items:flex-end;gap:6px;height:110px;margin-top:8px}
+.chart .col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%}
+.chart .b{width:100%;background:var(--accent);border-radius:4px 4px 0 0;min-height:2px}
+.chart .l{font-size:11px;color:var(--muted);margin-top:4px}
+.toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:#111827;border:1px solid var(--line);padding:10px 16px;border-radius:10px;display:none}
+.hidden{display:none!important}
+.chrow{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-top:1px solid var(--line)}
+.chrow:first-child{border-top:0}
+.chrow input[type=checkbox]{width:20px;height:20px;margin-top:2px;flex:none}
+.chrow.off .chname{color:var(--muted);text-decoration:line-through}
+.chname{font-weight:600}
+.q{display:inline-block;margin:4px 4px 0 0;padding:2px 8px;border-radius:99px;font-size:12px;background:var(--line);cursor:pointer;border:1px solid transparent}
+.q.def{background:#1d4ed8;color:#fff}
+.chsel{accent-color:var(--warn)}
+.req{border-color:var(--warn)}
+</style>
+</head>
+<body>
+<header><h1>📺 TiviSync Parent</h1><button class="small" id="logoutBtn" hidden>Log out</button></header>
+<main id="app"></main>
+<nav id="nav" hidden>
+  <button data-tab="home" class="active">Home</button>
+  <button data-tab="profiles">Profiles</button>
+  <button data-tab="usage">Usage</button>
+  <button data-tab="tvs">TVs</button>
+  <button data-tab="channels">Channels</button>
+  <button data-tab="sources">Sources</button>
+</nav>
+<div class="toast" id="toast"></div>
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmtMin = (sec) => { if (sec == null) return '∞'; const m = Math.round(sec / 60); return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`; };
+const ago = (ts) => { if (!ts) return 'never'; const s = (Date.now() - ts) / 1000; if (s < 90) return 'just now'; if (s < 3600) return `${Math.round(s / 60)} min ago`; if (s < 86400) return `${Math.round(s / 3600)} h ago`; return new Date(ts).toLocaleDateString(); };
+let token = null; try { token = localStorage.getItem('tvs_token'); } catch {}
+let tab = 'home', state = {}, pollTimer = null;
+// works both at /parent/ and behind Home Assistant ingress (/api/hassio_ingress/<token>/parent/)
+const BASE = location.pathname.replace(/parent\/.*$/, '');
+
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 2500); }
+
+async function api(method, url, body) {
+  const r = await fetch(BASE + url.replace(/^\//, ''), { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401 && url !== '/api/admin/login') { if (token) logout(true); throw new Error('Please log in'); }
+  if (!r.ok) throw new Error(j.error || 'Request failed');
+  return j;
+}
+
+function logout(silent) {
+  if (!silent && token) api('POST', '/api/admin/logout').catch(() => {});
+  token = null; try { localStorage.removeItem('tvs_token'); } catch {}
+  clearInterval(pollTimer); renderLogin();
+}
+
+function renderLogin() {
+  $('#nav').hidden = true; $('#logoutBtn').hidden = true;
+  $('#app').innerHTML = `<div class="card"><h3>Parent login</h3>
+    <form id="lf"><label>Password</label><input type="password" id="pw" autocomplete="current-password" required>
+    <div style="margin-top:12px"><button class="primary" style="width:100%">Log in</button></div></form>
+    <p class="muted">Tip: add this page to your home screen for an app-like experience.</p></div>`;
+  $('#lf').onsubmit = async (e) => {
+    e.preventDefault();
+    try { const r = await api('POST', '/api/admin/login', { password: $('#pw').value }); token = r.token; try { localStorage.setItem('tvs_token', token); } catch {} start(); }
+    catch (err) { toast(err.message); }
+  };
+}
+
+function start() {
+  $('#nav').hidden = false; $('#logoutBtn').hidden = false;
+  show(tab);
+  clearInterval(pollTimer);
+  pollTimer = setInterval(() => { if (tab === 'home' && !document.hidden) loadHome(true); }, 10000);
+}
+
+function show(t) {
+  tab = t;
+  document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
+  ({ home: loadHome, profiles: loadProfiles, usage: loadUsage, tvs: loadTvs, channels: loadChannels, sources: loadSources })[t]();
+}
+
+// ---------------- HOME ----------------
+async function loadHome(quiet) {
+  try { state.overview = await api('GET', '/api/admin/overview'); } catch (e) { if (!quiet) toast(e.message); return; }
+  if (tab !== 'home') return;
+  const { profiles, devices, requests } = state.overview;
+  const reqHtml = requests.map((r) => `<div class="card req"><h3>⏰ ${esc(r.profile_name)} wants ${r.minutes} more minutes</h3>
+     <div class="muted">${esc(r.device_name || '')} · ${ago(r.created_at)}${r.message ? ' · “' + esc(r.message) + '”' : ''}</div>
+     <div class="row" style="margin-top:10px">
+       <button class="ok" data-req="${r.id}" data-min="15">+15</button>
+       <button class="ok" data-req="${r.id}" data-min="30">+30</button>
+       <button class="ok" data-req="${r.id}" data-min="60">+60</button>
+       <button class="bad" data-req="${r.id}" data-deny="1">Say no</button>
+     </div></div>`).join('');
+  const watching = devices.filter((d) => d.nowPlaying);
+  const watchHtml = watching.length ? `<div class="card"><h3>Watching now</h3>${watching.map((d) => `<div class="row" style="margin:6px 0"><span class="pill live">● LIVE</span><b>${esc(d.nowPlaying.profile)}</b><span class="muted">${esc(d.nowPlaying.title || '')} · ${esc(d.name)}</span></div>`).join('')}</div>` : '';
+  const profHtml = profiles.map((p) => {
+    const a = p.today;
+    const pct = a.limited ? Math.min(100, (a.usedSec / Math.max(1, a.limitSec)) * 100) : 0;
+    const cls = !a.limited ? '' : pct >= 100 ? 'bad' : pct > 80 ? 'warn' : '';
+    return `<div class="card"><div class="row spread"><div class="row"><div class="avatar" style="background:${esc(p.color)}">${esc(p.name[0] || '?')}</div>
+      <div><b>${esc(p.name)}</b> ${p.isChild ? '<span class="pill">child</span>' : ''}<div class="muted">Today: ${fmtMin(a.usedSec)} watched${a.limited ? ` · ${fmtMin(a.remainingSec)} left of ${fmtMin(a.limitSec)}` : ' · no limit'}${a.bonusSec ? ` (incl. +${fmtMin(a.bonusSec)} extra)` : ''}</div></div></div></div>
+      ${a.limited ? `<div class="bar ${cls}"><div style="width:${pct}%"></div></div>
+      <div class="row" style="margin-top:10px"><span class="muted">Give extra time:</span>
+        <button class="small" data-bonus="${p.id}" data-min="15">+15m</button><button class="small" data-bonus="${p.id}" data-min="30">+30m</button>
+        <button class="small" data-bonus="${p.id}" data-min="60">+1h</button><button class="small" data-bonus="${p.id}" data-min="-15">−15m</button></div>` : ''}</div>`;
+  }).join('');
+  $('#app').innerHTML = reqHtml + watchHtml + (profHtml || `<div class="card"><h3>Welcome!</h3><p>Start by adding a <b>Source</b> (your IPTV login), then <b>Profiles</b>, then pair a <b>TV</b>.</p></div>`);
+  $('#app').querySelectorAll('[data-req]').forEach((b) => b.onclick = async () => {
+    try { await api('POST', `/api/admin/requests/${b.dataset.req}`, b.dataset.deny ? { approve: false } : { approve: true, minutes: Number(b.dataset.min) }); toast(b.dataset.deny ? 'Request declined' : `Added ${b.dataset.min} minutes`); loadHome(); } catch (e) { toast(e.message); }
+  });
+  $('#app').querySelectorAll('[data-bonus]').forEach((b) => b.onclick = async () => {
+    try { await api('POST', `/api/admin/profiles/${b.dataset.bonus}/bonus`, { minutes: Number(b.dataset.min) }); toast('Time updated'); loadHome(); } catch (e) { toast(e.message); }
+  });
+}
+
+// ---------------- PROFILES ----------------
+const COLORS = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b', '#a855f7', '#ec4899', '#14b8a6', '#64748b'];
+async function loadProfiles() {
+  try { state.overview = await api('GET', '/api/admin/overview'); } catch (e) { return toast(e.message); }
+  const ps = state.overview.profiles;
+  $('#app').innerHTML = ps.map((p) => `<div class="card"><div class="row spread"><div class="row"><div class="avatar" style="background:${esc(p.color)}">${esc(p.name[0])}</div><div><b>${esc(p.name)}</b>
+     <div class="muted">${p.hasPin ? '🔒 PIN' : 'No PIN'} · ${p.dailyLimitMin == null ? 'No daily limit' : p.dailyLimitMin + ' min/day'} · ${p.maxAge == null ? 'All age ratings' : 'Films & series up to ' + AGE[p.maxAge]}${p.blockedKeywords.length ? ' · hides: ' + esc(p.blockedKeywords.join(', ')) : ''}</div></div></div>
+     <button class="small" data-edit="${p.id}">Edit</button></div></div>`).join('') + `<button class="primary" id="addP" style="width:100%">+ Add profile</button>`;
+  $('#addP').onclick = () => editProfile(null);
+  $('#app').querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => editProfile(ps.find((p) => p.id == b.dataset.edit)));
+}
+
+const AGE = { 0: 'U', 8: 'PG', 12: '12', 15: '15', 18: '18' };
+function editProfile(p) {
+  const isNew = !p; p = p || { name: '', color: COLORS[0], isChild: false, dailyLimitMin: null, blockedKeywords: [], hasPin: false, maxAge: null };
+  $('#app').innerHTML = `<div class="card"><h3>${isNew ? 'New profile' : 'Edit ' + esc(p.name)}</h3><form id="pf">
+    <label>Name</label><input id="pn" value="${esc(p.name)}" required maxlength="30">
+    <label>Colour</label><div class="row">${COLORS.map((c) => `<label style="margin:0"><input type="radio" name="pc" value="${c}" ${c === p.color ? 'checked' : ''} style="width:auto"> <span class="avatar" style="display:inline-grid;width:24px;height:24px;background:${c}"></span></label>`).join('')}</div>
+    <label>PIN (4–8 digits) ${p.hasPin ? '– leave blank to keep current' : '– leave blank for no PIN'}</label><input id="ppin" inputmode="numeric" pattern="\\d{4,8}" autocomplete="off">
+    ${p.hasPin ? '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="pclear" style="width:auto"> Remove PIN</label>' : ''}
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="pchild" style="width:auto" ${p.isChild ? 'checked' : ''}> Child profile</label>
+    <label>Daily viewing limit (minutes, blank = unlimited)</label><input id="plim" type="number" min="0" max="1440" value="${p.dailyLimitMin ?? ''}">
+    <label>Age rating limit for films &amp; series (UK ratings)</label>
+    <select id="page">${[[null, 'No limit – all ratings'], [0, 'U – Universal'], [8, 'PG – up to PG'], [12, '12 – up to 12 / 12A'], [15, '15 – up to 15']].map(([v, t]) => `<option value="${v ?? ''}" ${(p.maxAge ?? null) === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
+    <div class="muted">With a limit, films and series without a known rating are hidden too, and adult-looking channels are removed. Set missing ratings in Sources › Age ratings.</div>
+    <label>Hide categories containing (comma separated)</label><input id="pblk" value="${esc(p.blockedKeywords.join(', '))}" placeholder="adult, xxx, 18+">
+    <div class="row" style="margin-top:14px"><button class="primary">Save</button><button type="button" id="pcancel">Cancel</button>${isNew ? '' : '<button type="button" class="bad" id="pdel">Delete</button>'}</div>
+  </form></div>`;
+  $('#pcancel').onclick = loadProfiles;
+  if (!isNew) $('#pdel').onclick = async () => { if (!confirm(`Delete ${p.name} and all their history?`)) return; await api('DELETE', `/api/admin/profiles/${p.id}`); loadProfiles(); };
+  $('#pf').onsubmit = async (e) => {
+    e.preventDefault();
+    const body = { name: $('#pn').value, color: $('input[name=pc]:checked')?.value, isChild: $('#pchild').checked,
+      dailyLimitMin: $('#plim').value === '' ? null : Number($('#plim').value), blockedKeywords: $('#pblk').value,
+      maxAge: $('#page').value === '' ? null : Number($('#page').value) };
+    const pin = $('#ppin').value.trim();
+    if (pin) body.pin = pin; else if ($('#pclear')?.checked) body.pin = null;
+    try { isNew ? await api('POST', '/api/admin/profiles', body) : await api('PATCH', `/api/admin/profiles/${p.id}`, body); toast('Saved'); loadProfiles(); } catch (err) { toast(err.message); }
+  };
+}
+
+// ---------------- USAGE ----------------
+async function loadUsage() {
+  let u, o;
+  try { [u, o] = await Promise.all([api('GET', '/api/admin/usage?days=7'), api('GET', '/api/admin/overview')]); } catch (e) { return toast(e.message); }
+  const days = []; for (let i = 6; i >= 0; i--) days.push(new Date(Date.now() - i * 86400000).toLocaleDateString('en-CA', { timeZone: 'Europe/London' }));
+  const charts = o.profiles.map((p) => {
+    const vals = days.map((d) => (u.daily.find((x) => x.profileId === p.id && x.day === d)?.seconds || 0));
+    const max = Math.max(3600, ...vals);
+    const total = vals.reduce((a, b) => a + b, 0);
+    return `<div class="card"><div class="row spread"><b>${esc(p.name)}</b><span class="muted">7 days: ${fmtMin(total)} · avg ${fmtMin(total / 7)}/day</span></div>
+      <div class="chart">${vals.map((v, i) => `<div class="col"><div class="b" style="height:${(v / max) * 100}%" title="${fmtMin(v)}"></div><div class="l">${new Date(days[i]).toLocaleDateString('en-GB', { weekday: 'short' }).slice(0, 2)}</div></div>`).join('')}</div>
+      <div class="muted" style="margin-top:4px">${vals.map((v) => fmtMin(v)).join(' · ')}</div></div>`;
+  }).join('');
+  const log = `<div class="card"><h3>Viewing log</h3><table><tr><th>When</th><th>Who</th><th>What</th><th>Time</th></tr>${u.sessions.map((s) => `<tr><td>${new Date(s.startedAt).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' })}</td><td>${esc(s.profile)}<div class="muted">${esc(s.device || '')}</div></td><td>${esc(s.title || '')}<div class="muted">${esc(s.type || '')}</div></td><td>${fmtMin(s.seconds)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">Nothing yet</td></tr>'}</table></div>`;
+  const reqs = u.requests.length ? `<div class="card"><h3>Extra-time requests</h3><table>${u.requests.map((r) => `<tr><td>${new Date(r.createdAt).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' })}</td><td>${esc(r.profile)}</td><td>${r.minutes}m</td><td>${r.status}${r.grantedMinutes ? ' (+' + r.grantedMinutes + 'm)' : ''}</td></tr>`).join('')}</table></div>` : '';
+  if (tab === 'usage') $('#app').innerHTML = charts + log + reqs;
+}
+
+// ---------------- TVS ----------------
+async function loadTvs() {
+  try { state.overview = await api('GET', '/api/admin/overview'); } catch (e) { return toast(e.message); }
+  const ds = state.overview.devices, vpn = state.overview.vpn;
+  $('#app').innerHTML = `<div class="card"><h3>Pair a new TV</h3><p class="muted">Open TiviSync on the TV, enter this server's <b>home network address</b> (e.g. <b>http://homeassistant.local:8080</b> or <b>http://192.168.x.x:8080</b>) and the code below.</p>
+     <div id="codeBox"></div><button class="primary" id="genCode" style="width:100%">Get pairing code</button></div>
+    <div class="card"><h3>🔒 Streaming VPN (Surfshark dedicated IP)</h3>
+     <p class="muted">The TV app tunnels only its own streaming through WireGuard. Traffic to this server stays on your home network.</p>
+     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="vreq" style="width:auto" ${vpn.required ? 'checked' : ''}> Only allow streaming through the VPN</label>
+     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="vhome" style="width:auto" ${vpn.homeOnly ? 'checked' : ''}> Use the VPN only on the home network (phones away from home stream directly)</label>
+     <label>Dedicated IP (the TV checks its public IP matches before playing)</label><input id="vip" value="${esc(vpn.dedicatedIp || '')}" placeholder="e.g. 185.123.45.67" inputmode="decimal">
+     <label>Shared WireGuard config – sent automatically to every phone and TV ${vpn.hasDefaultConfig ? '(saved ✓ – paste a new one to replace)' : ''}</label>
+     <p class="muted">Paste your Surfshark dedicated-IP WireGuard config once here. Devices load it by themselves (when TiviSync opens, every few minutes, and before playing) – nothing to enter on the TV or phone. Only add a per-device config below if two devices will stream at the same time, because one WireGuard key can't be connected from two places at once.</p>
+     <textarea id="vcfg" rows="5" style="width:100%;font-family:monospace;font-size:12px;border-radius:10px;background:#0b1220;color:var(--text);border:1px solid var(--line);padding:8px" placeholder="[Interface]\nPrivateKey = …\nAddress = …\n\n[Peer]\nPublicKey = …\nEndpoint = …"></textarea>
+     <div class="row" style="margin-top:10px"><button class="primary" id="vsave">Save VPN settings</button>${vpn.hasDefaultConfig ? '<button class="bad small" id="vclr">Remove default config</button>' : ''}</div></div>` +
+    `<div class="card"><h3>🌍 Away from home</h3><div id="remBox" class="muted">Checking…</div></div>` +
+    `<div class="card"><h3>📲 App updates</h3><div id="appBox" class="muted">Loading…</div>
+     <div class="row" style="margin-top:10px"><button class="small primary" id="appCheck">Check GitHub now</button>
+     <label class="btn small" style="margin:0;cursor:pointer">Upload APK<input type="file" id="appFile" accept=".apk" style="display:none"></label></div>
+     <p class="muted">TVs and phones check this server for new versions when TiviSync opens, and offer to install them.</p></div>` +
+    `<div class="card"><h3>💾 Backup &amp; restore</h3><p class="muted">Saves profiles, PINs, limits, paired TVs, watch history, channels, ratings and settings in one file. Use it to move TiviSync to a new Home Assistant app, or keep a safety copy.</p>
+     <div class="row"><button class="small primary" id="bkDown">Download backup</button>
+     <label class="btn small" style="margin:0;cursor:pointer">Restore from file<input type="file" id="bkFile" accept=".json,application/json" style="display:none"></label></div>
+     <div id="bkBox" class="muted" style="margin-top:8px"></div></div>` +
+    ds.map((d) => `<div class="card"><div class="row spread"><div><b>${esc(d.name)}</b> ${d.hasVpnConfig ? '<span class="pill">🔒 own VPN config</span>' : vpn.hasDefaultConfig ? '<span class="pill">🔒 shared VPN config</span>' : ''}<div class="muted">Last seen ${ago(d.lastSeen)}${d.nowPlaying ? ` · ${esc(d.nowPlaying.profile)} watching ${esc(d.nowPlaying.title || '')}` : ''}</div></div>
+      <div class="row"><button class="small" data-vpn="${d.id}">VPN config</button><button class="small" data-ren="${d.id}">Rename</button><button class="small bad" data-del="${d.id}">Remove</button></div></div>
+      <div class="hidden" id="dv${d.id}"><label>Own WireGuard config for this device (optional – a separate Surfshark key, only needed if it streams at the same time as another device). Leave empty and save to go back to the shared config.</label>
+      <textarea rows="5" style="width:100%;font-family:monospace;font-size:12px;border-radius:10px;background:#0b1220;color:var(--text);border:1px solid var(--line);padding:8px"></textarea>
+      <div class="row" style="margin-top:8px"><button class="primary small" data-vsave="${d.id}">Save</button></div></div></div>`).join('');
+  const showApp = (a) => {
+    const m = a.app;
+    $('#appBox').innerHTML = (m ? `Ready for devices: <b>${esc(m.versionName || ('build ' + m.versionCode))}</b> (${(m.size / 1048576).toFixed(1)} MB, ${esc(m.source)})` : 'No app build on the server yet.') +
+      (a.lastCheck && a.lastCheck.result ? `<br>Last check: ${esc(a.lastCheck.result)}` : '') +
+      (a.tokenSet === false ? '<br>⚠️ No GitHub token set – add <b>github_token</b> in the add-on Configuration, or upload an APK here.' : '');
+  };
+  api('GET', '/api/admin/app').then(showApp).catch(() => {});
+  api('GET', '/api/admin/remote').then((r) => { $('#remBox').innerHTML = r.url
+      ? `Phones and TVs use <b>${esc(r.url.replace('/api/tivisync', ''))}</b> when they can't reach your home network (${esc(r.source || '')}). Needs the TiviSync integration installed in Home Assistant.${r.error ? '<br>⚠️ ' + esc(r.error) : ''}`
+      : `No external address found${r.error ? ': ' + esc(r.error) : ''}.`; }).catch((e) => { $('#remBox').textContent = e.message; });
+  $('#appCheck').onclick = async () => { $('#appBox').textContent = 'Checking GitHub…'; try { const r = await api('POST', '/api/admin/app/check'); showApp({ app: r.app, lastCheck: { result: r.result } }); } catch (e) { toast(e.message); } };
+  $('#appFile').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const v = prompt('Build number for this APK (e.g. 6)'); if (!v) return;
+    $('#appBox').textContent = 'Uploading…';
+    const r = await fetch(BASE + 'api/admin/app/upload?version=' + encodeURIComponent(v), { method: 'POST', headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), 'Content-Type': 'application/octet-stream' }, body: f });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return toast(j.error || 'Upload failed');
+    showApp({ app: j.app }); toast('APK uploaded – devices will be offered the update');
+  };
+  $('#bkDown').onclick = async () => {
+    $('#bkBox').textContent = 'Preparing backup…';
+    try {
+      const r = await fetch(BASE + 'api/admin/backup', { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Backup failed');
+      const blob = await r.blob();
+      const name = (r.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'tivisync-backup.json';
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      $('#bkBox').textContent = `Downloaded ${name} (${(blob.size / 1024).toFixed(0)} KB).`;
+    } catch (e) { $('#bkBox').textContent = '⚠️ ' + e.message; }
+  };
+  $('#bkFile').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    if (!confirm('Replace everything in this TiviSync with the backup? Profiles, TVs, history and settings here will be overwritten.')) { e.target.value = ''; return; }
+    $('#bkBox').textContent = 'Restoring…';
+    const r = await fetch(BASE + 'api/admin/restore', { method: 'POST', headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), 'Content-Type': 'application/json' }, body: f });
+    const j = await r.json().catch(() => ({}));
+    e.target.value = '';
+    if (!r.ok) { $('#bkBox').textContent = '⚠️ ' + (j.error || 'Restore failed'); return; }
+    const n = j.tables || {};
+    $('#bkBox').innerHTML = `✅ Restored ${n.profiles ?? 0} profiles and ${n.devices ?? 0} TVs. <b>Restart the TiviSync app in Home Assistant</b> so everything reloads.`;
+  };
+  $('#genCode').onclick = async () => { const r = await api('POST', '/api/admin/pairing-code'); $('#codeBox').innerHTML = `<div class="code">${r.code}</div><p class="muted" style="text-align:center">Valid for 10 minutes</p>`; };
+  $('#vsave').onclick = async () => {
+    const v = { required: $('#vreq').checked, homeOnly: $('#vhome').checked, dedicatedIp: $('#vip').value };
+    if ($('#vcfg').value.trim()) v.defaultConfig = $('#vcfg').value;
+    try { await api('PUT', '/api/admin/settings', { vpn: v }); toast('VPN settings saved – TVs pick them up next time they open'); loadTvs(); } catch (e) { toast(e.message); }
+  };
+  if ($('#vclr')) $('#vclr').onclick = async () => { await api('PUT', '/api/admin/settings', { vpn: { defaultConfig: null } }); loadTvs(); };
+  $('#app').querySelectorAll('[data-vpn]').forEach((b) => b.onclick = () => $('#dv' + b.dataset.vpn).classList.toggle('hidden'));
+  $('#app').querySelectorAll('[data-vsave]').forEach((b) => b.onclick = async () => {
+    const cfg = $('#dv' + b.dataset.vsave + ' textarea').value;
+    try { await api('PATCH', `/api/admin/devices/${b.dataset.vsave}`, { wgConfig: cfg }); toast(cfg.trim() ? 'VPN config saved for this TV' : 'This TV now uses the default config'); loadTvs(); } catch (e) { toast(e.message); }
+  });
+  $('#app').querySelectorAll('[data-ren]').forEach((b) => b.onclick = async () => { const n = prompt('TV name', ds.find((d) => d.id == b.dataset.ren).name); if (n) { await api('PATCH', `/api/admin/devices/${b.dataset.ren}`, { name: n }); loadTvs(); } });
+  $('#app').querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => { if (confirm('Remove this TV? It will need pairing again.')) { await api('DELETE', `/api/admin/devices/${b.dataset.del}`); loadTvs(); } });
+}
+
+// ---------------- CHANNELS ----------------
+// Tick the channels each profile may see; channels in several qualities are merged into one.
+state.ch = { sourceId: null, profileId: null, cat: '', q: '', merged: false, sel: new Set(), data: null };
+async function loadChannels(reload) {
+  const st = state.ch;
+  let srcs; try { srcs = await api('GET', '/api/admin/sources'); if (!state.overview) state.overview = await api('GET', '/api/admin/overview'); } catch (e) { return toast(e.message); }
+  const profs = state.overview.profiles;
+  if (!srcs.length) { $('#app').innerHTML = '<div class="card">Add an IPTV source first (Sources tab).</div>'; return; }
+  if (!srcs.some((x) => x.id === st.sourceId)) st.sourceId = srcs[0].id;
+  if (!profs.some((x) => x.id === st.profileId)) st.profileId = profs[0]?.id ?? null;
+  $('#app').innerHTML = `<div class="card"><h3>📺 Channels</h3>
+    <p class="muted">Tick the channels each profile can see. Channels that come in several qualities (SD / HD / FHD / 4K) are merged into one – on the TV you pick the channel, then the quality.</p>
+    <div class="row">${srcs.length > 1 ? `<select id="chs" style="flex:1">${srcs.map((x) => `<option value="${x.id}" ${x.id === st.sourceId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>` : ''}
+      <select id="chp" style="flex:1">${profs.map((x) => `<option value="${x.id}" ${x.id === st.profileId ? 'selected' : ''}>👤 ${esc(x.name)}</option>`).join('')}</select>
+      <button class="small" id="chreload">↻ Reload list</button></div>
+    <div id="chinfo" class="muted" style="margin-top:8px">Loading channels from your provider…</div></div><div id="chbody"></div>`;
+  $('#chp').onchange = () => { st.profileId = Number($('#chp').value); loadChannels(); };
+  if ($('#chs')) $('#chs').onchange = () => { st.sourceId = Number($('#chs').value); st.cat = ''; st.sel.clear(); loadChannels(); };
+  $('#chreload').onclick = async () => { $('#chinfo').textContent = 'Reloading from your provider…'; try { await api('POST', '/api/admin/channels/reload', { sourceId: st.sourceId }); } catch (e) { toast(e.message); } loadChannels(); };
+  try { st.data = await api('GET', `/api/admin/channels?sourceId=${st.sourceId}&profileId=${st.profileId}`); } catch (e) { $('#chinfo').textContent = e.message; return; }
+  renderChannels();
+}
+
+function renderChannels() {
+  const st = state.ch, d = st.data;
+  const catName = Object.fromEntries(d.categories.map((c) => [c.id, c.name]));
+  const merged = d.groups.filter((g) => g.members.length > 1).length;
+  const hiddenCount = d.groups.filter((g) => g.hidden).length;
+  $('#chinfo').innerHTML = d.error && !d.total ? `⚠️ Couldn't load channels: ${esc(d.error)}`
+    : `${d.total} streams → <b>${d.groups.length}</b> channels (${merged} merged). <b>${d.groups.length - hiddenCount}</b> visible for this profile.${d.error ? ` ⚠️ ${esc(d.error)} (showing last list)` : ''}`
+    + (d.last ? `<br>🌙 Checked for new channels ${ago(d.last.at)}${d.last.reason === 'nightly' ? ' (nightly at 3am)' : ''}: ${d.last.error ? '⚠️ ' + esc(d.last.error)
+      : `${d.last.added ? `<b>${d.last.added} new</b>${d.last.addedNames?.length ? ' – ' + esc(d.last.addedNames.slice(0, 5).join(', ')) + (d.last.added > 5 ? '…' : '') : ''}` : 'no new channels'}${d.last.removed ? `, ${d.last.removed} removed` : ''}`}` : '<br>🌙 Checks for new channels every night at 3am.');
+  const q = st.q.trim().toLowerCase();
+  const list = d.groups.filter((g) => (!st.cat || g.categoryIds.includes(st.cat)) && (!st.merged || g.members.length > 1)
+    && (!q || g.name.toLowerCase().includes(q) || g.members.some((m) => m.name.toLowerCase().includes(q))));
+  const LIMIT = 300;
+  $('#chbody').innerHTML = `<div class="card">
+    <div class="row"><select id="chc" style="flex:1"><option value="">All categories</option>${d.categories.map((c) => `<option value="${esc(c.id)}" ${c.id === st.cat ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      <input id="chq" placeholder="Search channels" value="${esc(st.q)}" style="flex:1"></div>
+    <div class="row" style="margin-top:8px"><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="chm" style="width:auto" ${st.merged ? 'checked' : ''}> Merged only</label>
+      <button class="small" id="chall">☑ Tick all shown</button><button class="small" id="chnone">☐ Untick all shown</button>
+      <button class="small" id="chmerge" ${st.sel.size < 2 ? 'disabled' : ''}>🔗 Merge selected (${st.sel.size})</button></div>
+    <p class="muted" style="margin:8px 0 0">Click a quality to make it the default. Use the orange box to pick channels to merge by hand.</p></div>
+    <div class="card">${list.slice(0, LIMIT).map((g) => `<div class="chrow ${g.hidden ? 'off' : ''}">
+      <input type="checkbox" data-vis="${esc(g.key)}" ${g.hidden ? '' : 'checked'} title="Visible for this profile">
+      <div style="flex:1;min-width:0"><div class="chname">${esc(g.name)}</div>
+        <div class="muted" style="font-size:12px">${esc(g.categoryIds.map((c) => catName[c] || c).join(' · '))}</div>
+        ${g.members.length > 1 ? g.members.map((m) => `<span class="q ${m.ref === g.default ? 'def' : ''}" data-def="${esc(g.key)}" data-ref="${esc(m.ref)}" title="${esc(m.name)}">${m.ref === g.default ? '★ ' : ''}${esc(m.label)}</span>`).join('') : ''}</div>
+      <div class="row" style="gap:6px">${g.members.length > 1 ? `<button class="small" data-ren="${esc(g.key)}">Rename</button><button class="small" data-split="${esc(g.key)}">Split</button>` : ''}
+        <input type="checkbox" class="chsel" data-sel="${esc(g.key)}" ${st.sel.has(g.key) ? 'checked' : ''} title="Select to merge"></div></div>`).join('')
+      || '<p class="muted">No channels match.</p>'}
+      ${list.length > LIMIT ? `<p class="muted">Showing the first ${LIMIT} of ${list.length} – pick a category or search to narrow it down.</p>` : ''}</div>`;
+  const byKey = Object.fromEntries(d.groups.map((g) => [g.key, g]));
+  const setVis = async (groups, visible) => {
+    const refs = groups.flatMap((g) => g.members.map((m) => m.ref));
+    if (!refs.length) return;
+    try { await api('PUT', '/api/admin/channels/visibility', { sourceId: st.sourceId, profileId: st.profileId, refs, hidden: !visible });
+      groups.forEach((g) => { g.hidden = !visible; }); renderChannels(); } catch (e) { toast(e.message); }
+  };
+  $('#chc').onchange = () => { st.cat = $('#chc').value; renderChannels(); };
+  $('#chq').oninput = () => { st.q = $('#chq').value; clearTimeout(st.t); st.t = setTimeout(() => { renderChannels(); const i = $('#chq'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }, 300); };
+  $('#chm').onchange = () => { st.merged = $('#chm').checked; renderChannels(); };
+  $('#chall').onclick = () => setVis(list, true);
+  $('#chnone').onclick = () => { if (confirm(`Hide ${list.length} channels from this profile?`)) setVis(list, false); };
+  $('#chbody').querySelectorAll('[data-vis]').forEach((c) => c.onchange = () => setVis([byKey[c.dataset.vis]], c.checked));
+  $('#chbody').querySelectorAll('[data-sel]').forEach((c) => c.onchange = () => { c.checked ? st.sel.add(c.dataset.sel) : st.sel.delete(c.dataset.sel); renderChannels(); });
+  $('#chbody').querySelectorAll('[data-def]').forEach((c) => c.onclick = async () => {
+    try { await api('PUT', '/api/admin/channels/group', { sourceId: st.sourceId, key: c.dataset.def, defaultRef: c.dataset.ref }); byKey[c.dataset.def].default = c.dataset.ref; renderChannels(); } catch (e) { toast(e.message); }
+  });
+  $('#chbody').querySelectorAll('[data-ren]').forEach((b) => b.onclick = async () => {
+    const g = byKey[b.dataset.ren]; const n = prompt('Channel name', g.name); if (n == null) return;
+    try { await api('PUT', '/api/admin/channels/group', { sourceId: st.sourceId, key: g.key, name: n }); g.name = n.trim() || g.name; renderChannels(); } catch (e) { toast(e.message); }
+  });
+  $('#chbody').querySelectorAll('[data-split]').forEach((b) => b.onclick = async () => {
+    if (!confirm('Split this channel back into separate channels?')) return;
+    try { await api('PUT', '/api/admin/channels/group', { sourceId: st.sourceId, key: b.dataset.split, split: true }); loadChannels(); } catch (e) { toast(e.message); }
+  });
+  $('#chmerge').onclick = async () => {
+    const gs = [...st.sel].map((k) => byKey[k]).filter(Boolean);
+    const n = prompt('Name for the merged channel', gs[0]?.name || ''); if (n == null) return;
+    try { await api('POST', '/api/admin/channels/merge', { sourceId: st.sourceId, refs: gs.flatMap((g) => g.members.map((m) => m.ref)), name: n });
+      st.sel.clear(); toast('Merged – the TVs show it as one channel with a quality choice'); loadChannels(); } catch (e) { toast(e.message); }
+  };
+}
+
+// ---------------- SOURCES ----------------
+async function loadSources() {
+  let ss; try { ss = await api('GET', '/api/admin/sources'); } catch (e) { return toast(e.message); }
+  const kind = (s) => s.type === 'xtream' ? 'Xtream Codes' : s.hostedM3u ? 'M3U file' : 'M3U link';
+  $('#app').innerHTML = ss.map((s) => `<div class="card"><div class="row spread"><div><b>${esc(s.name)}</b> <span class="pill">${kind(s)}</span>
+     <div class="muted">${s.hostedM3u ? (s.url.endsWith('pending') ? '⚠️ no file uploaded yet' : 'Stored on this server · updated ' + ago(s.updatedAt)) : esc(s.url)}${s.epgUrl ? ' · EPG ✓' : ''}${s.backupUrls?.length ? ` · ${s.backupUrls.length} backup address${s.backupUrls.length > 1 ? 'es' : ''}` : ''}</div></div><button class="small" data-edit="${s.id}">Edit</button></div></div>`).join('') +
+    `<button class="primary" id="addS" style="width:100%">+ Add IPTV source</button><p class="muted">Sources are shared by every TV and profile. Uploaded files and logins are stored only on your server.</p>
+     <div class="card"><h3>🔥 Popular charts on the TV home screen</h3><div id="chBox" class="muted">Loading…</div>
+     <div class="row" style="margin-top:10px"><button class="small" id="chRefresh">Refresh now</button></div></div>
+     <div class="card" id="rtCard"><h3>🎬 Age ratings (UK)</h3><div class="muted">Loading…</div></div>`;
+  $('#addS').onclick = () => editSource(null);
+  const showCharts = (c) => {
+    const names = { 'netflix-tv': 'Netflix top 10 TV', 'prime-tv': 'Prime Video top 10 TV', 'sky-movies': 'Latest films on Sky' };
+    $('#chBox').innerHTML = Object.keys(names).map((id) => { const st = c.status?.[id];
+      return `<div>${st?.ok ? '✅' : st ? '⚠️' : '⏳'} <b>${names[id]}</b> – ${st?.ok ? st.count + ' titles' : st ? esc(st.error) : 'not fetched yet'}</div>`; }).join('') +
+      (c.tmdbKey ? '' : '<p>Prime Video and Sky need a free TMDB API key: create one at themoviedb.org › Settings › API, then paste it into <b>tmdb_api_key</b> in the add-on Configuration.</p>') +
+      `<div>Region ${esc(c.region)} · updated ${c.updatedAt ? ago(c.updatedAt) : 'never'}. TVs only show titles that are in your IPTV library.</div>`;
+  };
+  loadRatingsCard();
+  api('GET', '/api/admin/charts').then(showCharts).catch((e) => { $('#chBox').textContent = e.message; });
+  $('#chRefresh').onclick = async () => { $('#chBox').textContent = 'Fetching charts…'; try { await api('POST', '/api/admin/charts/refresh'); showCharts(await api('GET', '/api/admin/charts')); } catch (e) { toast(e.message); } };
+  $('#app').querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => editSource(ss.find((s) => s.id == b.dataset.edit)));
+}
+
+// Age ratings: progress, plus titles TiviSync couldn't rate so a parent can set them (hidden for limited profiles until then)
+async function loadRatingsCard() {
+  let r; try { r = await api('GET', '/api/admin/ratings'); } catch (e) { $('#rtCard').innerHTML = '<h3>🎬 Age ratings (UK)</h3>' + esc(e.message); return; }
+  const c = r.counts || {}, total = Object.values(c).reduce((a, b) => a + b, 0);
+  const opts = (sel) => [['', '–'], [0, 'U'], [8, 'PG'], [12, '12'], [15, '15'], [18, '18']].map(([v, t]) => `<option value="${v}" ${sel === v ? 'selected' : ''}>${t}</option>`).join('');
+  const row = (m, sel) => `<div class="chrow"><div style="flex:1;min-width:0"><div class="chname" style="font-weight:500">${esc(m.name)}${m.year ? ` <span class="muted">(${m.year})</span>` : ''}</div>
+      <div class="muted" style="font-size:12px">${m.kind === 'movie' ? 'Film' : 'Series'}</div></div>
+      <select data-rt="${esc(JSON.stringify([m.sourceId, m.kind, m.ref]))}" style="width:auto">${opts(sel)}</select></div>`;
+  $('#rtCard').innerHTML = `<h3>🎬 Age ratings (UK)</h3>
+    ${r.tmdbKey ? '' : '<p>⚠️ Needs the TMDB API key (add-on Configuration › tmdb_api_key).</p>'}
+    <div>${total ? `<b>${(c.rated || 0) + (c.manual || 0)}</b> of ${total} films &amp; series rated · ${(c.none || 0) + (c.error || 0)} not found · ${c.pending || 0} still to check` : 'Not started yet.'}
+      ${r.running ? ` · ⏳ checking now (${r.done} done)` : ''}</div>
+    <p class="muted">UK (BBFC) certificates first, US as a fallback. Profiles with an age limit only see titles rated at or below it – titles not found are hidden for them until you set a rating here.</p>
+    <div class="row"><button class="small" id="rtRun">Check now</button><input id="rtq" placeholder="Search titles not found" style="flex:1"></div>
+    <div id="rtList" style="margin-top:8px">${r.missing.map((m) => row(m, '')).join('') || '<p class="muted">Every title has a rating 🎉</p>'}</div>
+    ${r.manual.length ? `<details style="margin-top:8px"><summary>Set by hand (${r.manual.length})</summary>${r.manual.map((m) => row(m, m.age)).join('')}</details>` : ''}`;
+  $('#rtRun').onclick = async () => { await api('POST', '/api/admin/ratings/run'); toast('Checking titles – this runs in the background'); setTimeout(loadRatingsCard, 3000); };
+  $('#rtq').oninput = () => { const q = $('#rtq').value.toLowerCase(); $('#rtList').querySelectorAll('.chrow').forEach((d) => { d.style.display = d.textContent.toLowerCase().includes(q) ? '' : 'none'; }); };
+  $('#rtCard').querySelectorAll('[data-rt]').forEach((sel) => sel.onchange = async () => {
+    const [sourceId, kind, ref] = JSON.parse(sel.dataset.rt);
+    try { await api('PUT', '/api/admin/ratings', { sourceId, kind, ref, age: sel.value === '' ? null : Number(sel.value) }); toast('Rating saved'); } catch (e) { toast(e.message); }
+  });
+}
+
+async function upload(id, kind, file) {
+  const r = await fetch(BASE + `api/admin/sources/${id}/file?kind=${kind}`, { method: 'POST', headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}), 'Content-Type': 'application/octet-stream' }, body: file });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'Upload failed');
+  return j;
+}
+
+function editSource(s) {
+  const isNew = !s;
+  s = s || { name: '', type: 'm3u', url: '', username: '', password: '', epgUrl: '', hostedM3u: true, hostedEpg: false };
+  const mode = s.type === 'xtream' ? 'xtream' : s.hostedM3u ? 'file' : 'link';
+  $('#app').innerHTML = `<div class="card"><h3>${isNew ? 'New source' : 'Edit source'}</h3><form id="sf">
+    <label>Name</label><input id="sn" value="${esc(s.name)}" placeholder="My provider">
+    <label>Type</label><select id="st">
+      <option value="file" ${mode === 'file' ? 'selected' : ''}>M3U file – upload it here, TVs sync it from this server</option>
+      <option value="link" ${mode === 'link' ? 'selected' : ''}>M3U link (URL)</option>
+      <option value="xtream" ${mode === 'xtream' ? 'selected' : ''}>Xtream Codes (URL + username + password)</option></select>
+    <div id="fileBox"><label>M3U file ${s.hostedM3u && !String(s.url).endsWith('pending') ? '(uploaded ✓ – choose a new file to replace it)' : ''}</label><input type="file" id="sfile" accept=".m3u,.m3u8,.txt,audio/x-mpegurl"></div>
+    <div id="urlBox"><label id="sul">URL</label><input id="su" value="${s.hostedM3u ? '' : esc(s.url)}" placeholder="http://provider.example:8080">
+      <label>Backup server addresses – optional, one per line</label>
+      <textarea id="sbk" rows="3" style="width:100%;font-family:monospace;font-size:13px;border-radius:10px;background:#0b1220;color:var(--text);border:1px solid var(--line);padding:8px" placeholder="http://backup1.example:8080&#10;http://backup2.example">${esc((s.backupUrls || []).join('\n'))}</textarea>
+      <div class="muted">Same login on a different address. If the main one stops working the TVs switch to the next automatically.</div></div>
+    <div id="xt"><label>Username</label><input id="sus" value="${esc(s.username || '')}" autocomplete="off"><label>Password</label><input id="spw" value="${esc(s.password || '')}" autocomplete="off"></div>
+    <label>EPG / TV guide – optional${mode === 'xtream' ? ' (Xtream provides one automatically)' : ''}</label>
+    <select id="ek"><option value="none">None</option><option value="link" ${s.epgUrl && !s.hostedEpg ? 'selected' : ''}>XMLTV link</option><option value="file" ${s.hostedEpg ? 'selected' : ''}>Upload XMLTV file</option></select>
+    <input id="se" value="${s.hostedEpg ? '' : esc(s.epgUrl || '')}" placeholder="https://…/epg.xml.gz" style="margin-top:6px">
+    <input type="file" id="sefile" accept=".xml,.gz" style="margin-top:6px">${s.hostedEpg ? '<div class="muted">EPG file uploaded ✓</div>' : ''}
+    <div class="row" style="margin-top:14px"><button class="primary" id="ssave">Save</button><button type="button" id="scancel">Cancel</button>${isNew ? '' : '<button type="button" class="bad" id="sdel">Delete</button>'}</div>
+    <div class="muted" id="sprog"></div></form></div>`;
+  const sync = () => {
+    const m = $('#st').value, e = $('#ek').value;
+    $('#xt').classList.toggle('hidden', m !== 'xtream'); $('#fileBox').classList.toggle('hidden', m !== 'file'); $('#urlBox').classList.toggle('hidden', m === 'file');
+    $('#sul').textContent = m === 'xtream' ? 'Server URL' : 'M3U URL';
+    $('#se').classList.toggle('hidden', e !== 'link'); $('#sefile').classList.toggle('hidden', e !== 'file');
+  };
+  $('#st').onchange = sync; $('#ek').onchange = sync; sync();
+  $('#scancel').onclick = loadSources;
+  if (!isNew) $('#sdel').onclick = async () => { if (confirm('Delete this source?')) { await api('DELETE', `/api/admin/sources/${s.id}`); loadSources(); } };
+  $('#sf').onsubmit = async (e) => {
+    e.preventDefault();
+    const m = $('#st').value, ek = $('#ek').value;
+    const f = $('#sfile').files[0], ef = $('#sefile').files[0];
+    if (m === 'file' && isNew && !f) return toast('Choose the M3U file to upload');
+    const body = { name: $('#sn').value, type: m === 'xtream' ? 'xtream' : 'm3u', url: m === 'file' ? '' : $('#su').value,
+      hostedM3u: m === 'file', username: $('#sus').value, password: $('#spw').value,
+      epgUrl: ek === 'link' ? $('#se').value : '', hostedEpg: ek === 'file',
+      backupUrls: m === 'file' ? [] : $('#sbk').value, requiredIp: s.requiredIp || '' };
+    $('#ssave').disabled = true;
+    try {
+      const saved = isNew ? await api('POST', '/api/admin/sources', body) : await api('PUT', `/api/admin/sources/${s.id}`, body);
+      if (m === 'file' && f) { $('#sprog').textContent = `Uploading ${f.name} (${(f.size / 1048576).toFixed(1)} MB)…`; await upload(saved.id, 'm3u', f); }
+      if (ek === 'file' && ef) { $('#sprog').textContent = `Uploading ${ef.name}…`; await upload(saved.id, 'epg', ef); }
+      toast('Saved – TVs will sync it next time they open'); loadSources();
+    } catch (err) { toast(err.message); $('#ssave').disabled = false; $('#sprog').textContent = ''; }
+  };
+}
+
+document.querySelectorAll('nav button').forEach((b) => b.onclick = () => show(b.dataset.tab));
+$('#logoutBtn').onclick = () => logout(false);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && token && tab === 'home') loadHome(true); });
+// Try without a password first (Home Assistant ingress), else use saved token or show login
+api('GET', '/api/admin/overview').then(() => start()).catch(() => { if (!token) renderLogin(); });
+</script>
+</body>
+</html>

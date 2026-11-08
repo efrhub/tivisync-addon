@@ -1,0 +1,43 @@
+name: TiviSync
+version: "1.6.0"
+slug: tivisync
+url: https://github.com/efrhub/tivisync-addon
+description: Sync server + parental controls for the TiviSync Android TV IPTV app
+arch: [amd64, aarch64, armv7]
+startup: application
+boot: auto
+init: false
+ingress: true
+homeassistant_api: true
+ingress_port: 8080
+ingress_entry: parent/
+panel_icon: mdi:television-classic
+panel_title: TiviSync
+ports:
+  8080/tcp: 8080
+ports_description:
+  8080/tcp: "TiviSync API for the TVs on your home network"
+options:
+  admin_password: ""
+  tz: Europe/London
+  ha_webhook_url: "http://homeassistant:8123/api/webhook/tivisync_CHANGE_ME"
+  api_token: ""
+  ntfy_url: ""
+  public_url: ""
+  github_token: ""
+  github_repo: "efrhub/tivisync"
+  tmdb_api_key: ""
+  chart_region: GB
+  remote_url: ""
+schema:
+  admin_password: password?
+  tz: str
+  ha_webhook_url: str?
+  api_token: password?
+  ntfy_url: str?
+  public_url: str?
+  github_token: password?
+  github_repo: str?
+  tmdb_api_key: password?
+  chart_region: str?
+  remote_url: str?
