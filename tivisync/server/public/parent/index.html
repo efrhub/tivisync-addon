@@ -291,10 +291,12 @@ async function loadTvs() {
      <label class="btn small" style="margin:0;cursor:pointer">Restore from file<input type="file" id="bkFile" accept=".json,application/json" style="display:none"></label></div>
      <div id="bkBox" class="muted" style="margin-top:8px"></div></div>` +
     ds.map((d) => `<div class="card"><div class="row spread"><div><b>${esc(d.name)}</b> ${d.hasVpnConfig ? '<span class="pill">🔒 own VPN config</span>' : vpn.hasDefaultConfig ? '<span class="pill">🔒 shared VPN config</span>' : ''}<div class="muted">Last seen ${ago(d.lastSeen)}${d.nowPlaying ? ` · ${esc(d.nowPlaying.profile)} watching ${esc(d.nowPlaying.title || '')}` : ''}</div></div>
-      <div class="row"><button class="small" data-vpn="${d.id}">VPN config</button><button class="small" data-ren="${d.id}">Rename</button><button class="small bad" data-del="${d.id}">Remove</button></div></div>
+      <div class="row"><button class="small" data-logs="${d.id}">📜 Logs</button><button class="small" data-vpn="${d.id}">VPN config</button><button class="small" data-ren="${d.id}">Rename</button><button class="small bad" data-del="${d.id}">Remove</button></div></div>
       <div class="hidden" id="dv${d.id}"><label>Own WireGuard config for this device (optional – a separate Surfshark key, only needed if it streams at the same time as another device). Leave empty and save to go back to the shared config.</label>
       <textarea rows="5" style="width:100%;font-family:monospace;font-size:12px;border-radius:10px;background:#0b1220;color:var(--text);border:1px solid var(--line);padding:8px"></textarea>
-      <div class="row" style="margin-top:8px"><button class="primary small" data-vsave="${d.id}">Save</button></div></div></div>`).join('');
+      <div class="row" style="margin-top:8px"><button class="primary small" data-vsave="${d.id}">Save</button></div></div>
+      <div class="hidden" id="dl${d.id}"><div class="row" style="margin:8px 0"><span class="muted" style="flex:1">What this device's app reported (VPN, network, playback errors) – kept 7 days.</span><button class="small" data-lref="${d.id}">Refresh</button><button class="small" data-ldown="${d.id}">Download</button></div>
+      <pre style="max-height:320px;overflow:auto;white-space:pre-wrap;font-size:11px;background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:8px;margin:0">Loading…</pre></div></div>`).join('');
   const showApp = (a) => {
     const m = a.app;
     $('#appBox').innerHTML = (m ? `Ready for devices: <b>${esc(m.versionName || ('build ' + m.versionCode))}</b> (${(m.size / 1048576).toFixed(1)} MB, ${esc(m.source)})` : 'No app build on the server yet.') +
@@ -346,6 +348,20 @@ async function loadTvs() {
   };
   if ($('#vclr')) $('#vclr').onclick = async () => { await api('PUT', '/api/admin/settings', { vpn: { defaultConfig: null } }); loadTvs(); };
   $('#app').querySelectorAll('[data-vpn]').forEach((b) => b.onclick = () => $('#dv' + b.dataset.vpn).classList.toggle('hidden'));
+  const loadLogs = async (id) => {
+    const pre = $('#dl' + id + ' pre');
+    try { const r = await api('GET', `/api/admin/logs?device=${id}`); pre.textContent = r.lines.length ? r.lines.join('\n') : 'Nothing logged yet – logs arrive within a minute or two of the app being used (update the app to build 25 or later).'; pre.scrollTop = pre.scrollHeight; return r.lines; }
+    catch (e) { pre.textContent = '⚠️ ' + e.message; return []; }
+  };
+  $('#app').querySelectorAll('[data-logs]').forEach((b) => b.onclick = () => { const box = $('#dl' + b.dataset.logs); box.classList.toggle('hidden'); if (!box.classList.contains('hidden')) loadLogs(b.dataset.logs); });
+  $('#app').querySelectorAll('[data-lref]').forEach((b) => b.onclick = () => loadLogs(b.dataset.lref));
+  $('#app').querySelectorAll('[data-ldown]').forEach((b) => b.onclick = async () => {
+    const lines = await loadLogs(b.dataset.ldown);
+    const name = (ds.find((d) => d.id == b.dataset.ldown)?.name || 'device').replace(/[^\w-]+/g, '_');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([lines.join('\n') + '\n'], { type: 'text/plain' }));
+    a.download = `tivisync-log-${name}.txt`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  });
   $('#app').querySelectorAll('[data-vsave]').forEach((b) => b.onclick = async () => {
     const cfg = $('#dv' + b.dataset.vsave + ' textarea').value;
     try { await api('PATCH', `/api/admin/devices/${b.dataset.vsave}`, { wgConfig: cfg }); toast(cfg.trim() ? 'VPN config saved for this TV' : 'This TV now uses the default config'); loadTvs(); } catch (e) { toast(e.message); }

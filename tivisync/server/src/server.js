@@ -1254,6 +1254,41 @@ route('GET', '/api/tv/reminders', 'profile', async (req, b, p, { profile }) => {
   db.prepare('DELETE FROM reminders WHERE end < ?').run(now() - 86_400_000);
   return db.prepare('SELECT * FROM reminders WHERE profile_id = ? AND end > ? ORDER BY start LIMIT 200').all(profile.id, now() - 300_000).map(reminderRow);
 });
+// --- diagnostic logs from the apps: stored 7 days, also echoed to the add-on log ---
+const LOG_DAYS = 7;
+route('POST', '/api/tv/logs', 'device', async (req, b, p, ctx) => {
+  const entries = Array.isArray(b.entries) ? b.entries.slice(0, 500) : [];
+  const meta = b.meta && typeof b.meta === 'object' ? b.meta : {};
+  const ins = db.prepare('INSERT INTO device_logs (device_id, ts, level, tag, msg) VALUES (?,?,?,?,?)');
+  const t0 = now();
+  db.exec('BEGIN');
+  try {
+    if (meta && Object.keys(meta).length) ins.run(ctx.device.id, t0, 'I', 'device', Object.entries(meta).map(([k, v]) => `${k}=${String(v).slice(0, 80)}`).join(' ').slice(0, 600));
+    for (const e of entries) {
+      const ts = Math.min(Number(e.t) || t0, t0 + 60_000);
+      if (ts < t0 - LOG_DAYS * 86400_000) continue;
+      const level = ['D', 'I', 'W', 'E'].includes(e.l) ? e.l : 'I';
+      const tag = String(e.g || 'app').slice(0, 24);
+      const msg = String(e.m ?? '').slice(0, 1000);
+      ins.run(ctx.device.id, ts, level, tag, msg);
+      console.log(`[app] ${ctx.device.name} ${new Date(ts).toISOString().slice(5, 19).replace('T', ' ')} ${level}/${tag}: ${msg}`);
+    }
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+  return { ok: true, stored: entries.length };
+});
+route('GET', '/api/admin/logs', 'admin', async (req) => {
+  const q = new URL(req.url, 'http://x').searchParams;
+  const dev = Number(q.get('device')) || null;
+  const days = Math.min(Math.max(Number(q.get('days')) || LOG_DAYS, 1), LOG_DAYS);
+  const rows = db.prepare(`SELECT l.*, d.name FROM device_logs l LEFT JOIN devices d ON d.id = l.device_id
+    WHERE l.ts >= ? ${dev ? 'AND l.device_id = ?' : ''} ORDER BY l.ts, l.id LIMIT 20000`).all(...(dev ? [now() - days * 86400_000, dev] : [now() - days * 86400_000]));
+  return { count: rows.length, lines: rows.map((r) => `${new Date(r.ts).toISOString().replace('T', ' ').slice(0, 19)} ${r.name || '#' + r.device_id} ${r.level}/${r.tag}: ${r.msg}`) };
+});
+function pruneLogs() { try { db.prepare('DELETE FROM device_logs WHERE ts < ?').run(now() - LOG_DAYS * 86400_000); } catch { /* ignore */ } }
+pruneLogs();
+setInterval(pruneLogs, 3600_000).unref();
+
 route('POST', '/api/tv/reminders', 'profile', async (req, b, p, { profile }) => {
   const start = Number(b.start), end = Number(b.end) || Number(b.start) + 1800_000;
   if (!b.channelRef || !b.title || !start) throw new HttpError(400, 'channelRef, title and start required');

@@ -172,6 +172,9 @@ for (const sql of [
   'ALTER TABLE profiles ADD COLUMN max_age INTEGER',
   'ALTER TABLE profiles ADD COLUMN watch_hours TEXT', // JSON: 7 entries Mon..Sun, each null (any time) | {from,to} | "off"
   'CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)',
+  // diagnostic log lines sent by the TV / phone apps (kept 7 days)
+  'CREATE TABLE IF NOT EXISTS device_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER NOT NULL, ts INTEGER NOT NULL, level TEXT NOT NULL, tag TEXT NOT NULL, msg TEXT NOT NULL)',
+  'CREATE INDEX IF NOT EXISTS device_logs_dev_ts ON device_logs (device_id, ts)',
 ]) {
   try { db.exec(sql); } catch { /* already exists */ }
 }
