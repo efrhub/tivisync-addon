@@ -741,6 +741,72 @@ function haWs(messages) {
   });
 }
 
+// --- announcements: doorbell presses and messages from Home Assistant pause the TVs and are shown / read out ---
+// Home Assistant side: the doorbell entity (add-on option doorbell_entity) is watched automatically, and any
+// automation or script can send a message with the event  tivisync_announce  { message, title?, pause? }.
+const announcements = []; // newest last
+let annLast = 0;
+const haLive = { connected: false, error: null, since: 0, doorbell: null };
+function announce(kind, message, opts = {}) {
+  const at = now();
+  if (kind === 'doorbell' && at - annLast < 20_000 && announcements.some((a) => a.kind === 'doorbell' && at - a.at < 20_000)) return null; // one ring at a time
+  annLast = at;
+  const a = { id: `${at}-${Math.random().toString(36).slice(2, 7)}`, kind, at,
+    title: String(opts.title || (kind === 'doorbell' ? "🔔 Someone's at the door" : '📢 Announcement')).slice(0, 80),
+    message: String(message || '').slice(0, 300), pause: opts.pause !== false, speak: opts.speak !== false };
+  announcements.push(a);
+  while (announcements.length > 20 || (announcements[0] && at - announcements[0].at > 600_000)) announcements.shift();
+  console.log(`Announcement (${kind}): ${a.title}${a.message ? ' – ' + a.message : ''}`);
+  return a;
+}
+const ANNOUNCE_FRESH = 90_000;
+function currentAnnouncement() {
+  const a = announcements[announcements.length - 1];
+  if (!a || now() - a.at > ANNOUNCE_FRESH) return null;
+  return { ...a, ageMs: now() - a.at };
+}
+function startHaListener() {
+  const token = process.env.SUPERVISOR_TOKEN;
+  if (!token || typeof WebSocket === 'undefined') return;
+  const doorbell = (process.env.DOORBELL_ENTITY || 'binary_sensor.doorbell_visitor').trim();
+  haLive.doorbell = doorbell || null;
+  let id = 0;
+  const connect = () => {
+    let ws;
+    try { ws = new WebSocket('ws://supervisor/core/websocket'); } catch (e) { haLive.error = e.message; setTimeout(connect, 30_000); return; }
+    ws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+      if (m.type === 'auth_required') ws.send(JSON.stringify({ type: 'auth', access_token: token }));
+      else if (m.type === 'auth_invalid') { haLive.error = 'Home Assistant refused the add-on token'; ws.close(); }
+      else if (m.type === 'auth_ok') {
+        haLive.connected = true; haLive.error = null; haLive.since = now();
+        ws.send(JSON.stringify({ id: ++id, type: 'subscribe_events', event_type: 'tivisync_announce' }));
+        if (doorbell) ws.send(JSON.stringify({ id: ++id, type: 'subscribe_trigger', trigger: { platform: 'state', entity_id: doorbell, to: 'on' } }));
+      } else if (m.type === 'result' && !m.success) {
+        haLive.error = m.error?.message || 'subscription refused';
+      } else if (m.type === 'event' && m.event) {
+        const e = m.event;
+        if (e.event_type === 'tivisync_announce') {
+          const d = e.data || {};
+          announce(d.kind === 'doorbell' ? 'doorbell' : 'message', d.message, { title: d.title, pause: d.pause, speak: d.speak });
+        } else if (e.variables?.trigger) {
+          announce('doorbell', '');
+        }
+      }
+    };
+    ws.onclose = () => { haLive.connected = false; setTimeout(connect, 15_000); };
+    ws.onerror = () => { haLive.error = haLive.error || 'cannot reach Home Assistant'; try { ws.close(); } catch { /* ignore */ } };
+  };
+  connect();
+}
+if (!process.env.NO_CHARTS) setTimeout(startHaListener, 3_000);
+route('GET', '/api/admin/announce', 'admin', async () => ({ ...haLive, latest: currentAnnouncement() }));
+route('POST', '/api/admin/announce', 'admin', async (req, b) => {
+  const kind = b.kind === 'doorbell' ? 'doorbell' : 'message';
+  if (kind === 'message' && !String(b.message || '').trim()) throw new HttpError(400, 'Type a message to send');
+  return announce(kind, b.message, { title: b.title, pause: b.pause });
+});
+
 async function refreshRemoteUrl() {
   const fix = (u) => u.replace(/\/+$/, '') + '/api/tivisync';
   try {
@@ -1236,15 +1302,16 @@ route('POST', '/api/tv/handoff', 'profile', async (req, b, p, { profile, device 
 // Polled by every TV every few seconds. Returns (and clears) a pending handoff. Because the sender was already
 // signed in to that profile, the target TV is given a session for the same profile so it can resume straight away.
 route('GET', '/api/tv/handoff', 'device', async (req, b, p, ctx) => {
+  const announcement = currentAnnouncement();
   const h = handoffs.get(ctx.device.id);
-  if (!h) return { handoff: null, partyInvite: partyInviteFor(ctx.device.id) };
+  if (!h) return { handoff: null, partyInvite: partyInviteFor(ctx.device.id), announcement };
   handoffs.delete(ctx.device.id);
-  if (now() - h.at > HANDOFF_TTL) return { handoff: null };
+  if (now() - h.at > HANDOFF_TTL) return { handoff: null, announcement };
   const prof = db.prepare('SELECT * FROM profiles WHERE id = ?').get(h.profileId);
-  if (!prof) return { handoff: null };
+  if (!prof) return { handoff: null, announcement };
   const t = token();
   db.prepare('INSERT INTO profile_sessions (token, profile_id, device_id, created_at) VALUES (?,?,?,?)').run(t, prof.id, ctx.device.id, now());
-  return { handoff: h, profileToken: t, profile: profileRow(prof), allowance: allowance(prof.id) };
+  return { handoff: h, profileToken: t, profile: profileRow(prof), allowance: allowance(prof.id), announcement };
 });
 
 // ---------- TV guide reminders (per profile, so they follow you to whichever TV you're on) ----------
