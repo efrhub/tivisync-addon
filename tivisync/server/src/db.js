@@ -170,6 +170,7 @@ for (const sql of [
   'ALTER TABLE devices ADD COLUMN wg_config TEXT',
   'ALTER TABLE sources ADD COLUMN backup_urls TEXT',
   'ALTER TABLE profiles ADD COLUMN max_age INTEGER',
+  'ALTER TABLE profiles ADD COLUMN watch_hours TEXT', // JSON: 7 entries Mon..Sun, each null (any time) | {from,to} | "off"
   'CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)',
 ]) {
   try { db.exec(sql); } catch { /* already exists */ }

@@ -110,6 +110,7 @@ function profileRow(p, includeAdmin = false) {
     dailyLimitMin: p.daily_limit_min,
     blockedKeywords: p.blocked_keywords ? p.blocked_keywords.split(',').map((s) => s.trim()).filter(Boolean) : [],
     maxAge: p.max_age ?? null, // age-rating limit for films/series (null = no limit)
+    watchHours: parseHours(p.watch_hours), // 7 entries Mon..Sun: null = any time, {from,to} "HH:MM", or "off"
   };
   if (includeAdmin) out.createdAt = p.created_at;
   return out;
@@ -123,17 +124,84 @@ function sourceRow(s) {
     backupUrls: s.backup_urls ? JSON.parse(s.backup_urls) : [] };
 }
 
+// ---------- viewing hours (e.g. kids 09:00–21:00, set per day) ----------
+const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
+function parseHours(raw) {
+  try { const a = raw ? JSON.parse(raw) : null; return Array.isArray(a) && a.length === 7 ? a : null; } catch { return null; }
+}
+function validateHours(v) {
+  if (v === null || v === '') return null;
+  if (!Array.isArray(v) || v.length !== 7) throw new HttpError(400, 'Viewing hours need an entry for each day');
+  const out = v.map((d, i) => {
+    if (d === null || d === undefined || d === '' || d === 'any') return null;
+    if (d === 'off') return 'off';
+    if (!HHMM.test(String(d.from)) || !HHMM.test(String(d.to))) throw new HttpError(400, `${DAY_NAMES[i]}: times must look like 09:00`);
+    if (d.from === d.to) throw new HttpError(400, `${DAY_NAMES[i]}: start and end are the same – choose "No TV" instead`);
+    return { from: d.from, to: d.to };
+  });
+  return out.every((d) => d === null) ? null : JSON.stringify(out);
+}
+const dayIndex = (d) => (d.getDay() + 6) % 7; // Monday = 0
+function midnight(t, addDays = 0) { const d = new Date(t); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + addDays); return d; }
+function atTime(day, hhmm) { const [h, m] = hhmm.split(':').map(Number); const d = new Date(day); d.setHours(h, m, 0, 0); return d.getTime(); }
+/**
+ * Works out whether a profile may watch right now under its viewing hours. Extra time given today also lets
+ * them watch that much past today's end time. Returns null when the profile has no viewing hours.
+ */
+function hoursCheck(hours, bonusSec, t = now()) {
+  if (!hours) return null;
+  const spans = [];
+  for (let k = -1; k <= 2; k++) {
+    const day = midnight(t, k);
+    const w = hours[dayIndex(day)];
+    if (w === 'off') continue;
+    if (w === null) { spans.push([day.getTime(), midnight(day, 1).getTime()]); continue; }
+    let s = atTime(day, w.from), e = atTime(day, w.to);
+    if (e <= s) e = atTime(midnight(day, 1), w.to); // overnight, e.g. 18:00–01:00
+    if (k === 0 && bonusSec > 0) e += bonusSec * 1000;
+    spans.push([s, e]);
+  }
+  spans.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const sp of spans) { const last = merged[merged.length - 1]; if (last && sp[0] <= last[1]) last[1] = Math.max(last[1], sp[1]); else merged.push([...sp]); }
+  const inside = merged.find(([s, e]) => s <= t && t < e);
+  const w = hours[dayIndex(new Date(t))];
+  const todayText = w === 'off' ? `No TV on ${DAY_NAMES[dayIndex(new Date(t))]}s` : w ? `TV time today is ${w.from}–${w.to}` : null;
+  if (inside) return { allowed: true, endsAt: inside[1], secondsLeft: Math.max(0, Math.round((inside[1] - t) / 1000)), message: todayText };
+  const next = merged.find(([s]) => s > t);
+  const fmt = (ms) => new Date(ms).toTimeString().slice(0, 5);
+  const nextText = next ? (midnight(next[0]).getTime() === midnight(t).getTime() ? ` – back on at ${fmt(next[0])}` : ` – back on ${DAY_NAMES[dayIndex(new Date(next[0]))]} at ${fmt(next[0])}`) : '';
+  // before today's start time, extra minutes won't help; after the end time they extend it
+  const afterEnd = w && w !== 'off' && t >= atTime(midnight(t), w.from);
+  return { allowed: false, endsAt: null, secondsLeft: 0, nextStart: next ? next[0] : null, canExtend: !!afterEnd,
+    message: (todayText || 'Outside TV time') + nextText };
+}
+
 function allowance(profileId) {
   const p = db.prepare('SELECT * FROM profiles WHERE id = ?').get(profileId);
   if (!p) throw new HttpError(404, 'Profile not found');
   const u = db.prepare('SELECT seconds, bonus_seconds FROM usage_daily WHERE profile_id = ? AND day = ?').get(profileId, today()) || { seconds: 0, bonus_seconds: 0 };
   const pending = db.prepare("SELECT id FROM time_requests WHERE profile_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1").get(profileId);
+  const hc = hoursCheck(parseHours(p.watch_hours), u.bonus_seconds);
+  const base = { usedSec: u.seconds, bonusSec: u.bonus_seconds, pendingRequestId: pending?.id ?? null,
+    hoursMessage: hc?.message ?? null, windowEndsAt: hc?.endsAt ?? null };
+  if (hc && !hc.allowed) {
+    return { ...base, limited: true, allowed: false, reason: 'hours', canAsk: hc.canExtend, nextStart: hc.nextStart,
+      limitSec: p.daily_limit_min == null ? null : p.daily_limit_min * 60 + u.bonus_seconds, remainingSec: 0, message: hc.message };
+  }
+  const windowLeft = hc ? hc.secondsLeft : null;
   if (p.daily_limit_min == null) {
-    return { limited: false, allowed: true, usedSec: u.seconds, limitSec: null, bonusSec: u.bonus_seconds, remainingSec: null, pendingRequestId: pending?.id ?? null };
+    // only viewing hours: "remaining" is the time until the end of the current TV time (null when it's a no-limit day)
+    const limitedByHours = windowLeft != null && windowLeft < 24 * 3600;
+    return { ...base, limited: limitedByHours, allowed: true, reason: null, canAsk: true, limitSec: null,
+      remainingSec: limitedByHours ? windowLeft : null };
   }
   const limitSec = p.daily_limit_min * 60 + u.bonus_seconds;
-  const remainingSec = Math.max(0, limitSec - u.seconds);
-  return { limited: true, allowed: remainingSec > 0, usedSec: u.seconds, limitSec, bonusSec: u.bonus_seconds, remainingSec, pendingRequestId: pending?.id ?? null };
+  const byLimit = Math.max(0, limitSec - u.seconds);
+  const remainingSec = windowLeft != null ? Math.min(byLimit, windowLeft) : byLimit;
+  return { ...base, limited: true, allowed: remainingSec > 0, reason: remainingSec > 0 ? null : 'limit', canAsk: true,
+    limitSec, remainingSec, message: remainingSec > 0 ? null : 'Daily TV time used up' };
 }
 
 function addBonus(profileId, minutes) {
@@ -260,6 +328,7 @@ function validateProfile(b, partial) {
     if (a !== null && ![0, 8, 12, 15].includes(a)) throw new HttpError(400, 'Age limit must be U, PG, 12 or 15');
     out.max_age = a;
   }
+  if (b.watchHours !== undefined) out.watch_hours = validateHours(b.watchHours);
   if (b.blockedKeywords !== undefined) {
     const arr = Array.isArray(b.blockedKeywords) ? b.blockedKeywords : String(b.blockedKeywords).split(',');
     out.blocked_keywords = arr.map((s) => String(s).trim()).filter(Boolean).join(',');
@@ -277,6 +346,7 @@ route('POST', '/api/admin/profiles', 'admin', async (req, b) => {
   const r = db.prepare(`INSERT INTO profiles (name, color, pin_hash, is_child, daily_limit_min, blocked_keywords, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)`).run(v.name, v.color || '#3b82f6', v.pin_hash ?? null, v.is_child ?? 0, v.daily_limit_min ?? null, v.blocked_keywords ?? '', now());
   if (v.max_age !== undefined) db.prepare('UPDATE profiles SET max_age = ? WHERE id = ?').run(v.max_age, r.lastInsertRowid);
+  if (v.watch_hours !== undefined) db.prepare('UPDATE profiles SET watch_hours = ? WHERE id = ?').run(v.watch_hours, r.lastInsertRowid);
   return profileRow(db.prepare('SELECT * FROM profiles WHERE id = ?').get(r.lastInsertRowid), true);
 });
 
@@ -316,7 +386,7 @@ route('POST', '/api/admin/requests/:id', 'admin', async (req, b, { id }) => {
   if (!r) throw new HttpError(404, 'Request not found');
   if (r.status !== 'pending') return { ok: true, status: r.status };
   if (b.approve) {
-    const minutes = Math.max(1, Math.min(600, Number(b.minutes || r.minutes) | 0));
+    const minutes = Math.max(5, Math.min(600, Math.round((Number(b.minutes || r.minutes) || 0) / 5) * 5));
     addBonus(r.profile_id, minutes);
     db.prepare(`UPDATE time_requests SET status='approved', granted_minutes=?, decided_at=? WHERE id=?`).run(minutes, now(), id);
   } else {
@@ -827,7 +897,9 @@ route('POST', '/api/tv/heartbeat', 'profile', async (req, b, p, { profile, devic
 });
 
 route('POST', '/api/tv/time-request', 'profile', async (req, b, p, { profile, device }) => {
-  const minutes = Math.max(5, Math.min(240, Number(b.minutes) | 0 || 30));
+  const minutes = Math.max(5, Math.min(240, Math.round((Number(b.minutes) || 30) / 5) * 5));
+  const al = allowance(profile.id);
+  if (al.reason === 'hours' && !al.canAsk) throw new HttpError(400, `${al.message}. Extra time can't start TV time early.`);
   const existing = db.prepare("SELECT id FROM time_requests WHERE profile_id = ? AND status = 'pending'").get(profile.id);
   if (existing) return { id: existing.id, status: 'pending' };
   const r = db.prepare('INSERT INTO time_requests (profile_id, device_id, minutes, message, created_at) VALUES (?,?,?,?,?)')

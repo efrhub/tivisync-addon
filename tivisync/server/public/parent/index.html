@@ -9,6 +9,14 @@
 <link rel="icon" href="icon.svg">
 <title>TiviSync Parent</title>
 <style>
+  .stepper { display: inline-flex; align-items: center; gap: 6px; }
+  .stepper b { min-width: 70px; text-align: center; }
+  table.hours { width: 100%; border-collapse: collapse; margin: 6px 0; }
+  table.hours td { padding: 3px 4px; }
+  table.hours input, table.hours select { margin: 0; padding: 8px 6px; font-size: 14px; }
+  table.hours td:first-child { width: 38px; }
+  table.hours td:nth-child(2) { width: 112px; }
+  table.hours select { min-width: 104px; }
 :root{--bg:#0f172a;--card:#1e293b;--line:#334155;--text:#e2e8f0;--muted:#94a3b8;--accent:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444}
 *{box-sizing:border-box}
 body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);padding-bottom:calc(70px + env(safe-area-inset-bottom))}
@@ -128,9 +136,8 @@ async function loadHome(quiet) {
   const reqHtml = requests.map((r) => `<div class="card req"><h3>⏰ ${esc(r.profile_name)} wants ${r.minutes} more minutes</h3>
      <div class="muted">${esc(r.device_name || '')} · ${ago(r.created_at)}${r.message ? ' · “' + esc(r.message) + '”' : ''}</div>
      <div class="row" style="margin-top:10px">
-       <button class="ok" data-req="${r.id}" data-min="15">+15</button>
-       <button class="ok" data-req="${r.id}" data-min="30">+30</button>
-       <button class="ok" data-req="${r.id}" data-min="60">+60</button>
+       ${stepper('rq' + r.id, Math.max(5, Math.round(r.minutes / 5) * 5), 5, 240)}
+       <button class="ok" data-req="${r.id}">Give it</button>
        <button class="bad" data-req="${r.id}" data-deny="1">Say no</button>
      </div></div>`).join('');
   const watching = devices.filter((d) => d.nowPlaying);
@@ -140,19 +147,41 @@ async function loadHome(quiet) {
     const pct = a.limited ? Math.min(100, (a.usedSec / Math.max(1, a.limitSec)) * 100) : 0;
     const cls = !a.limited ? '' : pct >= 100 ? 'bad' : pct > 80 ? 'warn' : '';
     return `<div class="card"><div class="row spread"><div class="row"><div class="avatar" style="background:${esc(p.color)}">${esc(p.name[0] || '?')}</div>
-      <div><b>${esc(p.name)}</b> ${p.isChild ? '<span class="pill">child</span>' : ''}<div class="muted">Today: ${fmtMin(a.usedSec)} watched${a.limited ? ` · ${fmtMin(a.remainingSec)} left of ${fmtMin(a.limitSec)}` : ' · no limit'}${a.bonusSec ? ` (incl. +${fmtMin(a.bonusSec)} extra)` : ''}</div></div></div></div>
-      ${a.limited ? `<div class="bar ${cls}"><div style="width:${pct}%"></div></div>
-      <div class="row" style="margin-top:10px"><span class="muted">Give extra time:</span>
-        <button class="small" data-bonus="${p.id}" data-min="15">+15m</button><button class="small" data-bonus="${p.id}" data-min="30">+30m</button>
-        <button class="small" data-bonus="${p.id}" data-min="60">+1h</button><button class="small" data-bonus="${p.id}" data-min="-15">−15m</button></div>` : ''}</div>`;
+      <div><b>${esc(p.name)}</b> ${p.isChild ? '<span class="pill">child</span>' : ''}<div class="muted">Today: ${fmtMin(a.usedSec)} watched${a.reason === 'hours' ? ' · not TV time now' : a.limitSec ? ` · ${fmtMin(a.remainingSec)} left of ${fmtMin(a.limitSec)}` : a.limited ? ` · ${fmtMin(a.remainingSec)} of TV time left` : ' · no limit'}${a.bonusSec ? ` (incl. ${a.bonusSec > 0 ? '+' : '−'}${fmtMin(Math.abs(a.bonusSec))} extra)` : ''}</div></div></div></div>
+      ${a.hoursMessage || a.message ? `<div class="muted">🕘 ${esc(a.message || a.hoursMessage)}</div>` : ''}
+      ${a.limited || p.watchHours ? `${a.limitSec ? `<div class="bar ${cls}"><div style="width:${pct}%"></div></div>` : ''}
+      <div class="row" style="margin-top:10px"><span class="muted">Extra time today:</span>
+        ${stepper('bn' + p.id, 15, -120, 240)}<button class="small primary" data-bonus="${p.id}">Apply</button></div>
+      ${p.watchHours ? '<div class="muted">Extra time also lets them watch past today\'s end time.</div>' : ''}` : ''}</div>`;
   }).join('');
   $('#app').innerHTML = reqHtml + watchHtml + (profHtml || `<div class="card"><h3>Welcome!</h3><p>Start by adding a <b>Source</b> (your IPTV login), then <b>Profiles</b>, then pair a <b>TV</b>.</p></div>`);
   $('#app').querySelectorAll('[data-req]').forEach((b) => b.onclick = async () => {
-    try { await api('POST', `/api/admin/requests/${b.dataset.req}`, b.dataset.deny ? { approve: false } : { approve: true, minutes: Number(b.dataset.min) }); toast(b.dataset.deny ? 'Request declined' : `Added ${b.dataset.min} minutes`); loadHome(); } catch (e) { toast(e.message); }
+    const min = stepVal('rq' + b.dataset.req); delete stepCache['rq' + b.dataset.req];
+    try { await api('POST', `/api/admin/requests/${b.dataset.req}`, b.dataset.deny ? { approve: false } : { approve: true, minutes: min }); toast(b.dataset.deny ? 'Request declined' : `Added ${min} minutes`); loadHome(); } catch (e) { toast(e.message); }
   });
   $('#app').querySelectorAll('[data-bonus]').forEach((b) => b.onclick = async () => {
-    try { await api('POST', `/api/admin/profiles/${b.dataset.bonus}/bonus`, { minutes: Number(b.dataset.min) }); toast('Time updated'); loadHome(); } catch (e) { toast(e.message); }
+    const min = stepVal('bn' + b.dataset.bonus);
+    if (!min) return toast('Choose some minutes first');
+    delete stepCache['bn' + b.dataset.bonus];
+    try { await api('POST', `/api/admin/profiles/${b.dataset.bonus}/bonus`, { minutes: min }); toast(min > 0 ? `Gave ${min} extra minutes` : `Took away ${-min} minutes`); loadHome(); } catch (e) { toast(e.message); }
   });
+  bindSteppers();
+}
+
+// − 5 min / + 5 min stepper
+const stepCache = {}; // keeps a half-set value while the page refreshes itself
+function stepper(id, value, min, max) {
+  if (stepCache[id] != null) value = stepCache[id];
+  return `<span class="stepper" data-step="${id}" data-min="${min}" data-max="${max}"><button type="button" class="small" data-d="-5">−5</button><b id="${id}" data-v="${value}">${stepLabel(value)}</b><button type="button" class="small" data-d="5">+5</button></span>`;
+}
+function stepLabel(v) { return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v) + ' min'; }
+function stepVal(id) { return Number($('#' + id)?.dataset.v || 0); }
+function bindSteppers() {
+  $('#app').querySelectorAll('[data-step]').forEach((st) => st.querySelectorAll('[data-d]').forEach((b) => b.onclick = () => {
+    const out = st.querySelector('b');
+    const v = Math.max(Number(st.dataset.min), Math.min(Number(st.dataset.max), Number(out.dataset.v) + Number(b.dataset.d)));
+    out.dataset.v = v; out.textContent = stepLabel(v); stepCache[st.dataset.step] = v;
+  }));
 }
 
 // ---------------- PROFILES ----------------
@@ -161,13 +190,21 @@ async function loadProfiles() {
   try { state.overview = await api('GET', '/api/admin/overview'); } catch (e) { return toast(e.message); }
   const ps = state.overview.profiles;
   $('#app').innerHTML = ps.map((p) => `<div class="card"><div class="row spread"><div class="row"><div class="avatar" style="background:${esc(p.color)}">${esc(p.name[0])}</div><div><b>${esc(p.name)}</b>
-     <div class="muted">${p.hasPin ? '🔒 PIN' : 'No PIN'} · ${p.dailyLimitMin == null ? 'No daily limit' : p.dailyLimitMin + ' min/day'} · ${p.maxAge == null ? 'All age ratings' : 'Films & series up to ' + AGE[p.maxAge]}${p.blockedKeywords.length ? ' · hides: ' + esc(p.blockedKeywords.join(', ')) : ''}</div></div></div>
+     <div class="muted">${p.hasPin ? '🔒 PIN' : 'No PIN'} · ${p.dailyLimitMin == null ? 'No daily limit' : p.dailyLimitMin + ' min/day'} · ${p.maxAge == null ? 'All age ratings' : 'Films & series up to ' + AGE[p.maxAge]}${p.watchHours ? ' · ' + hoursSummary(p.watchHours) : ''}${p.blockedKeywords.length ? ' · hides: ' + esc(p.blockedKeywords.join(', ')) : ''}</div></div></div>
      <button class="small" data-edit="${p.id}">Edit</button></div></div>`).join('') + `<button class="primary" id="addP" style="width:100%">+ Add profile</button>`;
   $('#addP').onclick = () => editProfile(null);
   $('#app').querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => editProfile(ps.find((p) => p.id == b.dataset.edit)));
 }
 
 const AGE = { 0: 'U', 8: 'PG', 12: '12', 15: '15', 18: '18' };
+const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+function hoursSummary(h) {
+  const txt = (w) => w === 'off' ? 'no TV' : w ? `${w.from}–${w.to}` : 'any time';
+  if (h.every((w) => w === 'off')) return 'no TV any day';
+  if (h.every((w) => txt(w) === txt(h[0]))) return 'TV ' + txt(h[0]) + ' daily';
+  if (h.slice(0, 5).every((w) => txt(w) === txt(h[0])) && txt(h[5]) === txt(h[6])) return `TV ${txt(h[0])} weekdays, ${txt(h[5])} weekends`;
+  return 'TV hours set per day';
+}
 function editProfile(p) {
   const isNew = !p; p = p || { name: '', color: COLORS[0], isChild: false, dailyLimitMin: null, blockedKeywords: [], hasPin: false, maxAge: null };
   $('#app').innerHTML = `<div class="card"><h3>${isNew ? 'New profile' : 'Edit ' + esc(p.name)}</h3><form id="pf">
@@ -177,6 +214,12 @@ function editProfile(p) {
     ${p.hasPin ? '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="pclear" style="width:auto"> Remove PIN</label>' : ''}
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="pchild" style="width:auto" ${p.isChild ? 'checked' : ''}> Child profile</label>
     <label>Daily viewing limit (minutes, blank = unlimited)</label><input id="plim" type="number" min="0" max="1440" value="${p.dailyLimitMin ?? ''}">
+    <label>Viewing hours</label>
+    <div class="muted">When this profile can watch TV each day. Outside these times it stops, with a 5-minute warning. Times past midnight work (e.g. 18:00 to 01:00).</div>
+    <table class="hours">${DAYS.map((d, i) => { const w = (p.watchHours || [])[i] ?? null; const mode = w === 'off' ? 'off' : w ? 'set' : 'any';
+      return `<tr data-day="${i}"><td>${d}</td><td><select class="hmode"><option value="any" ${mode === 'any' ? 'selected' : ''}>Any time</option><option value="set" ${mode === 'set' ? 'selected' : ''}>Between</option><option value="off" ${mode === 'off' ? 'selected' : ''}>No TV</option></select></td>
+        <td><input type="time" class="hfrom" value="${w && w.from ? w.from : '09:00'}" ${mode === 'set' ? '' : 'disabled'}></td><td><input type="time" class="hto" value="${w && w.to ? w.to : '21:00'}" ${mode === 'set' ? '' : 'disabled'}></td></tr>`; }).join('')}</table>
+    <div class="row"><button type="button" class="small" id="hcopy">Copy Monday to every day</button><button type="button" class="small" id="hweek">Copy Monday to weekdays</button><button type="button" class="small" id="hclear">Any time, every day</button></div>
     <label>Age rating limit for films &amp; series (UK ratings)</label>
     <select id="page">${[[null, 'No limit – all ratings'], [0, 'U – Universal'], [8, 'PG – up to PG'], [12, '12 – up to 12 / 12A'], [15, '15 – up to 15']].map(([v, t]) => `<option value="${v ?? ''}" ${(p.maxAge ?? null) === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
     <div class="muted">With a limit, films and series without a known rating are hidden too, and adult-looking channels are removed. Set missing ratings in Sources › Age ratings.</div>
@@ -184,12 +227,21 @@ function editProfile(p) {
     <div class="row" style="margin-top:14px"><button class="primary">Save</button><button type="button" id="pcancel">Cancel</button>${isNew ? '' : '<button type="button" class="bad" id="pdel">Delete</button>'}</div>
   </form></div>`;
   $('#pcancel').onclick = loadProfiles;
+  const rows = () => [...$('#app').querySelectorAll('tr[data-day]')];
+  const sync = (tr) => { const on = tr.querySelector('.hmode').value === 'set'; tr.querySelector('.hfrom').disabled = !on; tr.querySelector('.hto').disabled = !on; };
+  rows().forEach((tr) => tr.querySelector('.hmode').onchange = () => sync(tr));
+  const copyMon = (days) => { const m = rows()[0]; rows().forEach((tr, i) => { if (!days.includes(i)) return;
+    tr.querySelector('.hmode').value = m.querySelector('.hmode').value; tr.querySelector('.hfrom').value = m.querySelector('.hfrom').value; tr.querySelector('.hto').value = m.querySelector('.hto').value; sync(tr); }); };
+  $('#hcopy').onclick = () => copyMon([1, 2, 3, 4, 5, 6]);
+  $('#hweek').onclick = () => copyMon([1, 2, 3, 4]);
+  $('#hclear').onclick = () => rows().forEach((tr) => { tr.querySelector('.hmode').value = 'any'; sync(tr); });
   if (!isNew) $('#pdel').onclick = async () => { if (!confirm(`Delete ${p.name} and all their history?`)) return; await api('DELETE', `/api/admin/profiles/${p.id}`); loadProfiles(); };
   $('#pf').onsubmit = async (e) => {
     e.preventDefault();
     const body = { name: $('#pn').value, color: $('input[name=pc]:checked')?.value, isChild: $('#pchild').checked,
       dailyLimitMin: $('#plim').value === '' ? null : Number($('#plim').value), blockedKeywords: $('#pblk').value,
-      maxAge: $('#page').value === '' ? null : Number($('#page').value) };
+      maxAge: $('#page').value === '' ? null : Number($('#page').value),
+      watchHours: rows().map((tr) => { const m = tr.querySelector('.hmode').value; return m === 'off' ? 'off' : m === 'set' ? { from: tr.querySelector('.hfrom').value, to: tr.querySelector('.hto').value } : null; }) };
     const pin = $('#ppin').value.trim();
     if (pin) body.pin = pin; else if ($('#pclear')?.checked) body.pin = null;
     try { isNew ? await api('POST', '/api/admin/profiles', body) : await api('PATCH', `/api/admin/profiles/${p.id}`, body); toast('Saved'); loadProfiles(); } catch (err) { toast(err.message); }
