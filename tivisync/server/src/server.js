@@ -371,6 +371,7 @@ route('POST', '/api/admin/profiles/:id/bonus', 'admin', async (req, b, { id }) =
   if (!Number.isFinite(minutes) || minutes === 0 || Math.abs(minutes) > 600) throw new HttpError(400, 'minutes must be between -600 and 600');
   addBonus(Number(id), minutes);
   // approving any pending requests for this profile
+  for (const r of db.prepare(`SELECT id FROM time_requests WHERE profile_id = ? AND status = 'pending'`).all(id)) closeApproval(`time-${r.id}`, 'answered', String(minutes), 'the parent panel');
   db.prepare(`UPDATE time_requests SET status = 'approved', granted_minutes = ?, decided_at = ? WHERE profile_id = ? AND status = 'pending'`)
     .run(minutes, now(), id);
   return allowance(Number(id));
@@ -385,13 +386,7 @@ route('POST', '/api/admin/requests/:id', 'admin', async (req, b, { id }) => {
   const r = db.prepare('SELECT * FROM time_requests WHERE id = ?').get(id);
   if (!r) throw new HttpError(404, 'Request not found');
   if (r.status !== 'pending') return { ok: true, status: r.status };
-  if (b.approve) {
-    const minutes = Math.max(5, Math.min(600, Math.round((Number(b.minutes || r.minutes) || 0) / 5) * 5));
-    addBonus(r.profile_id, minutes);
-    db.prepare(`UPDATE time_requests SET status='approved', granted_minutes=?, decided_at=? WHERE id=?`).run(minutes, now(), id);
-  } else {
-    db.prepare(`UPDATE time_requests SET status='denied', decided_at=? WHERE id=?`).run(now(), id);
-  }
+  decideTimeRequest(Number(id), !!b.approve, b.minutes || r.minutes, 'the parent panel');
   return { ok: true };
 });
 
@@ -741,6 +736,98 @@ function haWs(messages) {
   });
 }
 
+
+// ---------- approvals: things an adult must say yes or no to ----------
+// Children asking for more TV time, and extra jobs sent by Family Planner (event tivisync_approval). Each one is
+// shown on any TV where an adult profile is signed in, and sent to the adults' phones (add-on option
+// notify_services) with buttons. The first answer wins; the others are cleared.
+db.exec(`CREATE TABLE IF NOT EXISTS approvals (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, ref TEXT, title TEXT NOT NULL, message TEXT, options TEXT NOT NULL,
+  created_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', answer TEXT, answered_by TEXT, answered_at INTEGER)`);
+const APPROVAL_DAYS = 2;
+const TIME_OPTIONS = [{ label: '+15 min', value: '15' }, { label: '+30 min', value: '30' }, { label: '+1 hour', value: '60' }, { label: 'No', value: 'no' }];
+const notifyServices = () => String(process.env.NOTIFY_SERVICES || '').split(/[\n,]+/).map((x) => x.trim().replace(/^notify\./, '')).filter((x) => /^[a-z0-9_]+$/.test(x));
+async function haCall(domain, service, data) {
+  const token = process.env.SUPERVISOR_TOKEN;
+  if (!token) return;
+  const r = await fetch(`http://supervisor/core/api/services/${domain}/${service}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  if (!r.ok) throw new Error(`Home Assistant answered ${r.status}`);
+}
+async function haFire(type, data) {
+  const token = process.env.SUPERVISOR_TOKEN;
+  if (!token) return;
+  const r = await fetch(`http://supervisor/core/api/events/${type}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  if (!r.ok) throw new Error(`Home Assistant answered ${r.status}`);
+}
+function phoneOptions(options) { return options.length <= 3 ? options : [...options.filter((o) => o.value !== 'no').slice(-2), ...options.filter((o) => o.value === 'no')].slice(0, 3); }
+function sendToPhones(a) {
+  const options = JSON.parse(a.options);
+  for (const svc of notifyServices()) {
+    haCall('notify', svc, { title: a.title, message: a.message || '', data: { tag: `tvs-${a.id}`, priority: 'high', ttl: 0, channel: 'TiviSync', actions: phoneOptions(options).map((o) => ({ action: `TVS|${a.id}|${o.value}`, title: o.label })) } })
+      .catch((e) => console.warn(`Phone alert to ${svc} failed: ${e.message}`));
+  }
+}
+function clearPhones(id) {
+  for (const svc of notifyServices()) haCall('notify', svc, { message: 'clear_notification', data: { tag: `tvs-${id}` } }).catch(() => {});
+}
+function openApproval({ id, kind, ref = null, title, message = '', options }) {
+  const old = db.prepare('SELECT status FROM approvals WHERE id = ?').get(id);
+  if (old && old.status !== 'pending') return;
+  db.prepare(`INSERT OR REPLACE INTO approvals (id, kind, ref, title, message, options, created_at) VALUES (?,?,?,?,?,?,?)`)
+    .run(id, kind, ref == null ? null : String(ref), String(title).slice(0, 120), String(message || '').slice(0, 400), JSON.stringify(options), now());
+  console.log(`Approval needed: ${title}${message ? ' – ' + message : ''}`);
+  sendToPhones(db.prepare('SELECT * FROM approvals WHERE id = ?').get(id));
+}
+function closeApproval(id, status, answer = null, by = null) {
+  const r = db.prepare(`UPDATE approvals SET status = ?, answer = ?, answered_by = ?, answered_at = ? WHERE id = ? AND status = 'pending'`).run(status, answer, by, now(), id);
+  if (r.changes) clearPhones(id);
+  return r.changes > 0;
+}
+function decideTimeRequest(id, approve, minutes, by = null) {
+  const r = db.prepare('SELECT * FROM time_requests WHERE id = ?').get(id);
+  if (!r || r.status !== 'pending') return false;
+  if (approve) {
+    const m = Math.max(5, Math.min(600, Math.round((Number(minutes || r.minutes) || 0) / 5) * 5));
+    addBonus(r.profile_id, m);
+    db.prepare(`UPDATE time_requests SET status='approved', granted_minutes=?, decided_at=? WHERE id=?`).run(m, now(), id);
+  } else db.prepare(`UPDATE time_requests SET status='denied', decided_at=? WHERE id=?`).run(now(), id);
+  closeApproval(`time-${id}`, 'answered', approve ? String(minutes) : 'no', by);
+  return true;
+}
+function answerApproval(id, value, by) {
+  const a = db.prepare('SELECT * FROM approvals WHERE id = ?').get(id);
+  if (!a) throw new HttpError(404, 'That request has gone');
+  if (a.status !== 'pending') return { ok: true, already: true, answeredBy: a.answered_by };
+  if (!JSON.parse(a.options).some((o) => o.value === value)) throw new HttpError(400, 'Choose one of the answers');
+  if (a.kind === 'time') { decideTimeRequest(Number(a.ref), value !== 'no', Number(value), by); console.log(`${by} answered "${a.title}": ${value}`); return { ok: true }; }
+  closeApproval(id, 'answered', value, by);
+  haFire('tivisync_approval_answer', { id, value, by }).catch((e) => console.warn(`Couldn't send the answer to Home Assistant: ${e.message}`));
+  console.log(`${by} answered "${a.title}": ${value}`);
+  return { ok: true };
+}
+function approvalFor(profile) {
+  if (!profile || profile.is_child) return null;
+  db.prepare(`UPDATE approvals SET status = 'expired' WHERE status = 'pending' AND created_at < ?`).run(now() - APPROVAL_DAYS * 864e5);
+  const a = db.prepare(`SELECT * FROM approvals WHERE status = 'pending' ORDER BY created_at LIMIT 1`).get();
+  return a ? { id: a.id, title: a.title, message: a.message, options: JSON.parse(a.options) } : null;
+}
+function profileByRef(ref) {
+  const r = String(ref ?? '').trim();
+  if (!r) return null;
+  return db.prepare('SELECT * FROM profiles WHERE id = ?').get(/^\d+$/.test(r) ? Number(r) : -1) || db.prepare('SELECT * FROM profiles WHERE lower(name) = lower(?)').get(r);
+}
+// TV time earned in Family Planner (event tivisync_bonus). Taking time back never goes below today's normal allowance.
+function earnBonus(ref, minutes, reason) {
+  const p = profileByRef(ref), m = Math.round(Number(minutes) || 0);
+  if (!p || !m || Math.abs(m) > 600) return;
+  if (m < 0) {
+    const u = db.prepare('SELECT bonus_seconds FROM usage_daily WHERE profile_id = ? AND day = ?').get(p.id, today());
+    const take = Math.min(-m * 60, u ? u.bonus_seconds : 0);
+    if (take > 0) addBonus(p.id, -take / 60);
+  } else addBonus(p.id, m);
+  console.log(`TV time for ${p.name}: ${m > 0 ? '+' : ''}${m} min${reason ? ` (${reason})` : ''}`);
+}
+
 // --- announcements: doorbell presses and messages from Home Assistant pause the TVs and are shown / read out ---
 // Home Assistant side: the doorbell entity (add-on option doorbell_entity) is watched automatically, and any
 // automation or script can send a message with the event  tivisync_announce  { message, title?, pause? }.
@@ -794,7 +881,7 @@ function dailyFor(profile) {
 function profileOnDevice(req, deviceId) {
   const pt = req.headers['x-profile-token'];
   const s = pt && db.prepare('SELECT profile_id FROM profile_sessions WHERE token = ? AND device_id = ?').get(pt, deviceId);
-  return s ? db.prepare('SELECT id, name FROM profiles WHERE id = ?').get(s.profile_id) : null;
+  return s ? db.prepare('SELECT id, name, is_child FROM profiles WHERE id = ?').get(s.profile_id) : null;
 }
 function startHaListener() {
   const token = process.env.SUPERVISOR_TOKEN;
@@ -811,13 +898,25 @@ function startHaListener() {
       else if (m.type === 'auth_invalid') { haLive.error = 'Home Assistant refused the add-on token'; ws.close(); }
       else if (m.type === 'auth_ok') {
         haLive.connected = true; haLive.error = null; haLive.since = now();
-        ws.send(JSON.stringify({ id: ++id, type: 'subscribe_events', event_type: 'tivisync_announce' }));
+        for (const t of ['tivisync_announce', 'tivisync_approval', 'tivisync_approval_cancel', 'tivisync_bonus', 'mobile_app_notification_action'])
+          ws.send(JSON.stringify({ id: ++id, type: 'subscribe_events', event_type: t }));
         if (doorbell) ws.send(JSON.stringify({ id: ++id, type: 'subscribe_trigger', trigger: { platform: 'state', entity_id: doorbell, to: 'on' } }));
       } else if (m.type === 'result' && !m.success) {
         haLive.error = m.error?.message || 'subscription refused';
       } else if (m.type === 'event' && m.event) {
         const e = m.event;
-        if (e.event_type === 'tivisync_announce') {
+        const d0 = e.data || {};
+        if (e.event_type === 'tivisync_approval') {
+          if (d0.id && d0.title && Array.isArray(d0.options) && d0.options.length)
+            openApproval({ id: String(d0.id).slice(0, 80), kind: 'external', title: d0.title, message: d0.message, options: d0.options.slice(0, 4).map((o) => ({ label: String(o.label).slice(0, 20), value: String(o.value).slice(0, 20) })) });
+        } else if (e.event_type === 'tivisync_approval_cancel') {
+          if (d0.id) closeApproval(String(d0.id), 'cancelled', null, d0.by || null);
+        } else if (e.event_type === 'tivisync_bonus') {
+          earnBonus(d0.profile, d0.minutes, d0.reason);
+        } else if (e.event_type === 'mobile_app_notification_action') {
+          const m = /^TVS\|([^|]+)\|(.+)$/.exec(String(d0.action || ''));
+          if (m) { try { answerApproval(m[1], m[2], 'a phone'); } catch (err) { console.warn(err.message); } }
+        } else if (e.event_type === 'tivisync_announce') {
           const d = e.data || {};
           if (d.daily) { setDailyNote(d.profile, d); return; }
           announce(d.kind === 'doorbell' ? 'doorbell' : 'message', d.message, { title: d.title, pause: d.pause, speak: d.speak, profile: d.profile });
@@ -1012,6 +1111,8 @@ route('POST', '/api/tv/time-request', 'profile', async (req, b, p, { profile, de
     .run(profile.id, device.id, minutes, b.message ? String(b.message).slice(0, 200) : null, now());
   notify(`${profile.name} wants more TV time`, `${profile.name} is asking for ${minutes} more minutes on ${device.name}. Open the parent app to approve.`,
     { event: 'time_request', requestId: Number(r.lastInsertRowid), profileId: profile.id, profile: profile.name, minutes, device: device.name });
+  openApproval({ id: `time-${Number(r.lastInsertRowid)}`, kind: 'time', ref: Number(r.lastInsertRowid), title: `📺 ${profile.name} wants more TV time`,
+    message: `On ${device.name}${b.message ? `: "${String(b.message).slice(0, 120)}"` : ''}`, options: TIME_OPTIONS });
   return { id: Number(r.lastInsertRowid), status: 'pending' };
 });
 
@@ -1344,15 +1445,32 @@ route('POST', '/api/tv/handoff', 'profile', async (req, b, p, { profile, device 
 route('GET', '/api/tv/handoff', 'device', async (req, b, p, ctx) => {
   const signedIn = profileOnDevice(req, ctx.device.id);
   const announcement = currentAnnouncement(signedIn) || dailyFor(signedIn);
+  const approval = approvalFor(signedIn);
   const h = handoffs.get(ctx.device.id);
-  if (!h) return { handoff: null, partyInvite: partyInviteFor(ctx.device.id), announcement };
+  if (!h) return { handoff: null, partyInvite: partyInviteFor(ctx.device.id), announcement, approval };
   handoffs.delete(ctx.device.id);
-  if (now() - h.at > HANDOFF_TTL) return { handoff: null, announcement };
+  if (now() - h.at > HANDOFF_TTL) return { handoff: null, announcement, approval };
   const prof = db.prepare('SELECT * FROM profiles WHERE id = ?').get(h.profileId);
-  if (!prof) return { handoff: null, announcement };
+  if (!prof) return { handoff: null, announcement, approval };
   const t = token();
   db.prepare('INSERT INTO profile_sessions (token, profile_id, device_id, created_at) VALUES (?,?,?,?)').run(t, prof.id, ctx.device.id, now());
-  return { handoff: h, profileToken: t, profile: profileRow(prof), allowance: allowance(prof.id), announcement };
+  return { handoff: h, profileToken: t, profile: profileRow(prof), allowance: allowance(prof.id), announcement, approval };
+});
+
+// An adult answering a request on a TV.
+route('POST', '/api/tv/approvals/:id', 'profile', async (req, b, { id }, { profile }) => {
+  if (profile.is_child) throw new HttpError(403, 'Only an adult can answer that');
+  return answerApproval(decodeURIComponent(id), String(b.value ?? ''), profile.name);
+});
+route('GET', '/api/admin/approvals', 'admin', async () =>
+  db.prepare(`SELECT id, kind, title, message, options, created_at AS createdAt, status, answer, answered_by AS answeredBy FROM approvals WHERE created_at > ? ORDER BY created_at DESC LIMIT 50`)
+    .all(now() - 7 * 864e5).map((a) => ({ ...a, options: JSON.parse(a.options) })));
+route('POST', '/api/admin/approvals/:id', 'admin', async (req, b, { id }) => answerApproval(decodeURIComponent(id), String(b.value ?? ''), 'the parent panel'));
+// Lets the tests and the panel open one by hand (same as the Home Assistant event).
+route('POST', '/api/admin/approvals', 'admin', async (req, b) => {
+  if (b.bonus) { earnBonus(b.profile, b.minutes, b.reason); return { ok: true }; }
+  openApproval({ id: String(b.id), kind: 'external', title: b.title, message: b.message, options: b.options });
+  return { ok: true };
 });
 
 // ---------- TV guide reminders (per profile, so they follow you to whichever TV you're on) ----------
