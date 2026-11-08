@@ -753,17 +753,29 @@ function announce(kind, message, opts = {}) {
   annLast = at;
   const a = { id: `${at}-${Math.random().toString(36).slice(2, 7)}`, kind, at,
     title: String(opts.title || (kind === 'doorbell' ? "🔔 Someone's at the door" : '📢 Announcement')).slice(0, 80),
-    message: String(message || '').slice(0, 300), pause: opts.pause !== false, speak: opts.speak !== false };
+    message: String(message || '').slice(0, 300), pause: opts.pause !== false, speak: opts.speak !== false,
+    profile: opts.profile != null && String(opts.profile).trim() ? String(opts.profile).trim().slice(0, 60) : null };
   announcements.push(a);
   while (announcements.length > 20 || (announcements[0] && at - announcements[0].at > 600_000)) announcements.shift();
   console.log(`Announcement (${kind}): ${a.title}${a.message ? ' – ' + a.message : ''}`);
   return a;
 }
 const ANNOUNCE_FRESH = 90_000;
-function currentAnnouncement() {
-  const a = announcements[announcements.length - 1];
-  if (!a || now() - a.at > ANNOUNCE_FRESH) return null;
-  return { ...a, ageMs: now() - a.at };
+// Newest announcement for this TV: ones for everyone, or ones aimed at the profile signed in on it (by id or name).
+function currentAnnouncement(profile = null) {
+  for (let i = announcements.length - 1; i >= 0; i--) {
+    const a = announcements[i];
+    if (now() - a.at > ANNOUNCE_FRESH) break;
+    if (a.profile && !(profile && (a.profile === String(profile.id) || a.profile.toLowerCase() === String(profile.name || '').toLowerCase()))) continue;
+    const { profile: _p, ...rest } = a;
+    return { ...rest, ageMs: now() - a.at };
+  }
+  return null;
+}
+function profileOnDevice(req, deviceId) {
+  const pt = req.headers['x-profile-token'];
+  const s = pt && db.prepare('SELECT profile_id FROM profile_sessions WHERE token = ? AND device_id = ?').get(pt, deviceId);
+  return s ? db.prepare('SELECT id, name FROM profiles WHERE id = ?').get(s.profile_id) : null;
 }
 function startHaListener() {
   const token = process.env.SUPERVISOR_TOKEN;
@@ -788,7 +800,7 @@ function startHaListener() {
         const e = m.event;
         if (e.event_type === 'tivisync_announce') {
           const d = e.data || {};
-          announce(d.kind === 'doorbell' ? 'doorbell' : 'message', d.message, { title: d.title, pause: d.pause, speak: d.speak });
+          announce(d.kind === 'doorbell' ? 'doorbell' : 'message', d.message, { title: d.title, pause: d.pause, speak: d.speak, profile: d.profile });
         } else if (e.variables?.trigger) {
           announce('doorbell', '');
         }
@@ -800,11 +812,18 @@ function startHaListener() {
   connect();
 }
 if (!process.env.NO_CHARTS) setTimeout(startHaListener, 3_000);
+// Other Home Assistant add-ons (e.g. Family Planner) can list the profiles to link people to them.
+// Only answered on Home Assistant's internal add-on network, never to the LAN or the internet.
+route('GET', '/api/internal/profiles', 'none', async (req) => {
+  const ra = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  if (!/^172\.30\.3[23]\.\d+$/.test(ra) || ra === '172.30.32.1') throw new HttpError(403, 'Only available to Home Assistant add-ons');
+  return db.prepare('SELECT id, name FROM profiles ORDER BY name').all();
+});
 route('GET', '/api/admin/announce', 'admin', async () => ({ ...haLive, latest: currentAnnouncement() }));
 route('POST', '/api/admin/announce', 'admin', async (req, b) => {
   const kind = b.kind === 'doorbell' ? 'doorbell' : 'message';
   if (kind === 'message' && !String(b.message || '').trim()) throw new HttpError(400, 'Type a message to send');
-  return announce(kind, b.message, { title: b.title, pause: b.pause });
+  return announce(kind, b.message, { title: b.title, pause: b.pause, profile: b.profile });
 });
 
 async function refreshRemoteUrl() {
@@ -1302,7 +1321,7 @@ route('POST', '/api/tv/handoff', 'profile', async (req, b, p, { profile, device 
 // Polled by every TV every few seconds. Returns (and clears) a pending handoff. Because the sender was already
 // signed in to that profile, the target TV is given a session for the same profile so it can resume straight away.
 route('GET', '/api/tv/handoff', 'device', async (req, b, p, ctx) => {
-  const announcement = currentAnnouncement();
+  const announcement = currentAnnouncement(profileOnDevice(req, ctx.device.id));
   const h = handoffs.get(ctx.device.id);
   if (!h) return { handoff: null, partyInvite: partyInviteFor(ctx.device.id), announcement };
   handoffs.delete(ctx.device.id);
