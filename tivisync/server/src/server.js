@@ -692,6 +692,7 @@ route('POST', '/api/admin/remote/refresh', 'admin', async () => { await refreshR
 
 route('GET', '/api/tv/bootstrap', 'device', async (req, b, p, ctx) => ({
   remoteUrl: remote.url || getSetting('remote_url'),
+  lanUrl: getSetting('lan_url'),
   device: { id: ctx.device.id, name: ctx.device.name },
   profiles: db.prepare('SELECT * FROM profiles ORDER BY id').all().map((x) => profileRow(x)),
   sources: db.prepare('SELECT * FROM sources ORDER BY id').all().map(sourceRow),
@@ -1140,9 +1141,12 @@ const handoffs = new Map(); // targetDeviceId -> { ...item, profileId, fromName,
 const HANDOFF_TTL = 10 * 60_000;
 
 route('GET', '/api/tv/devices', 'device', async (req, b, p, ctx) =>
-  db.prepare('SELECT id, name, last_seen, now_title, now_at FROM devices WHERE id != ? ORDER BY name').all(ctx.device.id).map((d) => ({
+  db.prepare(`SELECT d.id, d.name, d.last_seen, d.now_title, d.now_at,
+      (SELECT pr.name FROM profile_sessions s JOIN profiles pr ON pr.id = s.profile_id WHERE s.device_id = d.id ORDER BY s.created_at DESC LIMIT 1) AS profile_name
+    FROM devices d WHERE d.id != ? ORDER BY d.name`).all(ctx.device.id).map((d) => ({
     id: d.id, name: d.name, online: now() - (d.last_seen || 0) < 90_000,
     nowPlaying: d.now_at && now() - d.now_at < 120_000 ? d.now_title : null,
+    profileName: d.profile_name || null,
   })));
 
 route('POST', '/api/tv/handoff', 'profile', async (req, b, p, { profile, device }) => {
@@ -1161,7 +1165,7 @@ route('POST', '/api/tv/handoff', 'profile', async (req, b, p, { profile, device 
 // signed in to that profile, the target TV is given a session for the same profile so it can resume straight away.
 route('GET', '/api/tv/handoff', 'device', async (req, b, p, ctx) => {
   const h = handoffs.get(ctx.device.id);
-  if (!h) return { handoff: null };
+  if (!h) return { handoff: null, partyInvite: partyInviteFor(ctx.device.id) };
   handoffs.delete(ctx.device.id);
   if (now() - h.at > HANDOFF_TTL) return { handoff: null };
   const prof = db.prepare('SELECT * FROM profiles WHERE id = ?').get(h.profileId);
@@ -1169,6 +1173,154 @@ route('GET', '/api/tv/handoff', 'device', async (req, b, p, ctx) => {
   const t = token();
   db.prepare('INSERT INTO profile_sessions (token, profile_id, device_id, created_at) VALUES (?,?,?,?)').run(t, prof.id, ctx.device.id, now());
   return { handoff: h, profileToken: t, profile: profileRow(prof), allowance: allowance(prof.id) };
+});
+
+// ---------- TV guide reminders (per profile, so they follow you to whichever TV you're on) ----------
+const reminderRow = (r) => ({ id: r.id, sourceId: r.source_id, channelRef: r.channel_ref, channelName: r.channel_name,
+  channelLogo: r.channel_logo, title: r.title, start: r.start, end: r.end });
+route('GET', '/api/tv/reminders', 'profile', async (req, b, p, { profile }) => {
+  db.prepare('DELETE FROM reminders WHERE end < ?').run(now() - 86_400_000);
+  return db.prepare('SELECT * FROM reminders WHERE profile_id = ? AND end > ? ORDER BY start LIMIT 200').all(profile.id, now() - 300_000).map(reminderRow);
+});
+route('POST', '/api/tv/reminders', 'profile', async (req, b, p, { profile }) => {
+  const start = Number(b.start), end = Number(b.end) || Number(b.start) + 1800_000;
+  if (!b.channelRef || !b.title || !start) throw new HttpError(400, 'channelRef, title and start required');
+  if (end < now()) throw new HttpError(400, 'That programme has already finished');
+  const n = db.prepare('SELECT COUNT(*) n FROM reminders WHERE profile_id = ?').get(profile.id).n;
+  if (n >= 200) throw new HttpError(400, 'Too many reminders – remove some first');
+  db.prepare(`INSERT INTO reminders (profile_id, source_id, channel_ref, channel_name, channel_logo, title, start, end, created_at)
+    VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id, source_id, channel_ref, start) DO UPDATE SET title = excluded.title, end = excluded.end`)
+    .run(profile.id, Number(b.sourceId) || 0, String(b.channelRef), String(b.channelName || ''), b.channelLogo || null, String(b.title).slice(0, 200), start, end, now());
+  return reminderRow(db.prepare('SELECT * FROM reminders WHERE profile_id = ? AND source_id = ? AND channel_ref = ? AND start = ?')
+    .get(profile.id, Number(b.sourceId) || 0, String(b.channelRef), start));
+});
+route('DELETE', '/api/tv/reminders/:id', 'profile', async (req, b, { id }, { profile }) => {
+  db.prepare('DELETE FROM reminders WHERE id = ? AND profile_id = ?').run(Number(id), profile.id);
+  return { ok: true };
+});
+
+// ---------- watch party: several TVs play the same film in step ----------
+// The host invites TVs, everyone joins and says they're ready, the host presses start. Play / pause / seek from
+// any member is shared; each TV polls every second and corrects itself against the server clock.
+const parties = new Map(); // id -> party
+const PARTY_IDLE = 6 * 3600_000, INVITE_TTL = 30 * 60_000;
+setInterval(() => { for (const [id, pt] of parties) if (now() - pt.updatedAt > PARTY_IDLE) parties.delete(id); }, 10 * 60_000).unref();
+
+function partyView(pt, deviceId) {
+  return {
+    id: pt.id, isHost: pt.host.deviceId === deviceId, hostName: pt.host.profileName, hostDevice: pt.host.deviceName,
+    title: pt.item.seriesTitle ? `${pt.item.seriesTitle} – ${pt.item.title}` : pt.item.title, poster: pt.item.logo || null,
+    state: pt.state, positionMs: pt.positionMs, at: pt.at, serverNow: now(), lastAction: pt.lastAction || null,
+    members: [{ deviceId: pt.host.deviceId, name: pt.host.deviceName, profileName: pt.host.profileName, status: 'host' },
+      ...[...pt.members.values()].map((m) => ({ deviceId: m.deviceId, name: m.deviceName, profileName: m.profileName, status: m.status, note: m.note || null }))],
+  };
+}
+function partyFor(id, deviceId) {
+  const pt = parties.get(String(id));
+  if (!pt) throw new HttpError(404, 'This watch party has finished');
+  if (pt.host.deviceId !== deviceId && !pt.members.has(deviceId)) throw new HttpError(403, "You're not in this watch party");
+  return pt;
+}
+function partyInviteFor(deviceId) {
+  for (const pt of parties.values()) {
+    const m = pt.members.get(deviceId);
+    if (m && m.status === 'invited' && pt.state !== 'ended' && now() - pt.createdAt < INVITE_TTL)
+      return { partyId: pt.id, hostName: pt.host.profileName, hostDevice: pt.host.deviceName, title: partyView(pt, deviceId).title, poster: pt.item.logo || null };
+  }
+  return null;
+}
+// is this film / series allowed for an age-limited profile? (same rules as the TV app: unrated = hidden)
+function itemAllowed(profile, item) {
+  if (profile.max_age == null) return true;
+  const kind = item.type === 'movie' ? 'movie' : 'series';
+  const src = db.prepare('SELECT type FROM sources WHERE id = ?').get(Number(item.sourceId));
+  const ref = kind === 'movie' ? (src?.type === 'm3u' ? item.url : String(item.itemId)) : String(item.seriesId || '');
+  const r = db.prepare('SELECT age FROM title_ratings WHERE source_id = ? AND kind = ? AND ref = ?').get(Number(item.sourceId), kind, ref);
+  return r != null && r.age != null && r.age <= profile.max_age;
+}
+
+route('POST', '/api/tv/party', 'profile', async (req, b, p, { profile, device }) => {
+  const it = b.item || {};
+  if (!['movie', 'episode'].includes(it.type) || !it.url) throw new HttpError(400, 'Pick a film or episode to watch together');
+  const ids = [...new Set((Array.isArray(b.deviceIds) ? b.deviceIds : []).map(Number))].filter((d) => d && d !== device.id);
+  if (!ids.length) throw new HttpError(400, 'Choose at least one TV to invite');
+  const item = {};
+  for (const k of ['type', 'url', 'title', 'sourceId', 'itemId', 'logo', 'seriesId', 'seriesTitle', 'season', 'episode']) if (it[k] !== undefined) item[k] = it[k];
+  // one party per host TV
+  for (const [id, old] of parties) if (old.host.deviceId === device.id) { old.state = 'ended'; old.lastAction = 'The host started a new party'; old.updatedAt = now(); parties.delete(id); }
+  const members = new Map();
+  for (const id of ids) {
+    const d = db.prepare(`SELECT d.id, d.name, (SELECT pr.name FROM profile_sessions s JOIN profiles pr ON pr.id = s.profile_id
+      WHERE s.device_id = d.id ORDER BY s.created_at DESC LIMIT 1) AS profile_name FROM devices d WHERE d.id = ?`).get(id);
+    if (d) members.set(d.id, { deviceId: d.id, deviceName: d.name, profileName: d.profile_name || null, status: 'invited' });
+  }
+  if (!members.size) throw new HttpError(404, 'Those TVs were not found');
+  const pt = { id: token().slice(0, 12), host: { deviceId: device.id, deviceName: device.name, profileId: profile.id, profileName: profile.name },
+    item, members, state: 'lobby', positionMs: 0, at: now(), createdAt: now(), updatedAt: now() };
+  parties.set(pt.id, pt);
+  return partyView(pt, device.id);
+});
+
+route('GET', '/api/tv/party/:id', 'device', async (req, b, { id }, ctx) => partyView(partyFor(id, ctx.device.id), ctx.device.id));
+
+route('POST', '/api/tv/party/:id/join', 'profile', async (req, b, { id }, { profile, device }) => {
+  const pt = partyFor(id, device.id);
+  const m = pt.members.get(device.id);
+  if (!m) throw new HttpError(400, "You're the host");
+  if (pt.state === 'ended') throw new HttpError(410, 'This watch party has finished');
+  pt.updatedAt = now();
+  m.profileName = profile.name;
+  if (b.accept === false) { m.status = 'declined'; return { ok: true }; }
+  if (!itemAllowed(profile, pt.item)) {
+    m.status = 'declined'; m.note = 'not allowed for this profile';
+    throw new HttpError(403, `"${partyView(pt, device.id).title}" isn't allowed on ${profile.name}'s profile`);
+  }
+  m.status = 'joined'; m.note = null;
+  return { party: partyView(pt, device.id), item: pt.item };
+});
+
+route('POST', '/api/tv/party/:id/ready', 'device', async (req, b, { id }, ctx) => {
+  const pt = partyFor(id, ctx.device.id);
+  const m = pt.members.get(ctx.device.id);
+  if (m && ['joined', 'ready'].includes(m.status)) m.status = b.ready === false ? 'joined' : 'ready';
+  pt.updatedAt = now();
+  return partyView(pt, ctx.device.id);
+});
+
+route('POST', '/api/tv/party/:id/control', 'device', async (req, b, { id }, ctx) => {
+  const pt = partyFor(id, ctx.device.id);
+  const isHost = pt.host.deviceId === ctx.device.id;
+  const m = pt.members.get(ctx.device.id);
+  if (!isHost && !(m && ['joined', 'ready'].includes(m.status))) throw new HttpError(403, 'Join the party first');
+  if (pt.state === 'ended') throw new HttpError(410, 'This watch party has finished');
+  const who = isHost ? pt.host.profileName : (m.profileName || m.deviceName);
+  const pos = Math.max(0, Number(b.positionMs) || 0);
+  switch (b.action) {
+    case 'start':
+      if (!isHost) throw new HttpError(403, 'Only the host can start');
+      pt.state = 'playing'; pt.positionMs = pos; pt.at = now() + 2500; pt.lastAction = `${who} started the film`; break;
+    case 'play':
+      if (pt.state === 'lobby') throw new HttpError(400, 'Waiting for the host to start');
+      pt.state = 'playing'; pt.positionMs = pos; pt.at = now() + 800; pt.lastAction = `${who} pressed play`; break;
+    case 'pause':
+      if (pt.state === 'lobby') throw new HttpError(400, 'Waiting for the host to start');
+      pt.state = 'paused'; pt.positionMs = pos; pt.at = now(); pt.lastAction = `${who} paused`; break;
+    case 'seek':
+      if (pt.state === 'lobby') throw new HttpError(400, 'Waiting for the host to start');
+      pt.positionMs = pos; pt.at = now() + (pt.state === 'playing' ? 800 : 0); pt.lastAction = `${who} skipped`; break;
+    default: throw new HttpError(400, 'Unknown action');
+  }
+  pt.updatedAt = now();
+  return partyView(pt, ctx.device.id);
+});
+
+route('POST', '/api/tv/party/:id/leave', 'device', async (req, b, { id }, ctx) => {
+  const pt = parties.get(String(id));
+  if (!pt) return { ok: true };
+  if (pt.host.deviceId === ctx.device.id) { pt.state = 'ended'; pt.lastAction = `${pt.host.profileName} ended the watch party`; }
+  else { const m = pt.members.get(ctx.device.id); if (m) m.status = 'left'; }
+  pt.updatedAt = now();
+  return { ok: true };
 });
 
 route('GET', '/api/health', 'none', async () => ({ ok: true, time: now(), today: today() }));
@@ -1190,12 +1342,25 @@ function serveStatic(req, res) {
 }
 
 // ---------- server ----------
+// Remember the home-network address the TVs use (e.g. http://192.168.0.100:8080), so phones paired through
+// Nabu Casa can still tell when they're at home – that's when the streaming VPN is needed.
+let lanUrlCache = null;
+function noteLanAddress(req) {
+  const host = String(req.headers.host || '');
+  if (!/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)\d{1,3}\.\d{1,3}(:\d+)?$/.test(host) || !fromHomeNetwork(req)) return;
+  const url = 'http://' + host;
+  if (url === lanUrlCache) return;
+  lanUrlCache = url;
+  if (getSetting('lan_url') !== url) setSetting('lan_url', url);
+}
+
 const server = http.createServer(async (req, res) => {
   const send = (status, obj) => {
     res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify(obj));
   };
   const pathname = new URL(req.url, 'http://x').pathname;
+  noteLanAddress(req);
   if (!pathname.startsWith('/api/') && pathname !== '/tv' && pathname !== '/TiviSync.apk') return serveStatic(req, res);
   try {
     for (const r of routes) {

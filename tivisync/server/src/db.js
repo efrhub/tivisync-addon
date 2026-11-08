@@ -101,6 +101,20 @@ CREATE TABLE IF NOT EXISTS title_ratings (
 CREATE INDEX IF NOT EXISTS title_ratings_status ON title_ratings(status);
 
 -- channels a profile should NOT see (per IPTV source). ref = Xtream stream_id, or the stream URL for M3U.
+CREATE TABLE IF NOT EXISTS reminders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  source_id INTEGER NOT NULL,
+  channel_ref TEXT NOT NULL,
+  channel_name TEXT NOT NULL,
+  channel_logo TEXT,
+  title TEXT NOT NULL,
+  start INTEGER NOT NULL,
+  end INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE (profile_id, source_id, channel_ref, start)
+);
+
 CREATE TABLE IF NOT EXISTS channel_hidden (
   profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
   source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
