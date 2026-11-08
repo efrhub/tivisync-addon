@@ -1,0 +1,25 @@
+name: Unpack add-on bundle
+on:
+  push:
+    paths: [bundle.b64]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack bundle.b64 into the repo
+        run: |
+          set -euo pipefail
+          if [ "$(tr -d ' \n\r' < bundle.b64 | wc -c)" -lt 100 ]; then echo "bundle.b64 is empty, nothing to do"; exit 0; fi
+          tr -d ' \n\r' < bundle.b64 | base64 -d > /tmp/bundle.tgz
+          rm -rf tivisync
+          tar -xzf /tmp/bundle.tgz
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "No changes"; exit 0; fi
+          git commit -m "Unpack add-on $(grep '^version' tivisync/config.yaml | cut -d'"' -f2)"
+          git push
