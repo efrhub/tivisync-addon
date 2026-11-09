@@ -843,16 +843,21 @@ function announce(kind, message, opts = {}) {
     message: String(message || '').slice(0, 300), pause: opts.pause !== false, speak: opts.speak !== false,
     profile: opts.profile != null && String(opts.profile).trim() ? String(opts.profile).trim().slice(0, 60) : null };
   announcements.push(a);
-  while (announcements.length > 20 || (announcements[0] && at - announcements[0].at > 600_000)) announcements.shift();
+  while (announcements.length > 40 || (announcements[0] && at - announcements[0].at > 32 * 60_000)) announcements.shift();
   console.log(`Announcement (${kind}): ${a.title}${a.message ? ' – ' + a.message : ''}`);
   return a;
 }
 const ANNOUNCE_FRESH = 90_000;
+const PROFILE_FRESH = 31 * 60_000;
 // Newest announcement for this TV: ones for everyone, or ones aimed at the profile signed in on it (by id or name).
 function currentAnnouncement(profile = null) {
   for (let i = announcements.length - 1; i >= 0; i--) {
     const a = announcements[i];
-    if (now() - a.at > ANNOUNCE_FRESH) break;
+    const age = now() - a.at;
+    if (age > PROFILE_FRESH) break;
+    // messages for one person (e.g. Family Planner's "chores to do", sent every 30 min) stay waiting so they
+    // pop up as soon as that person signs in; messages for everyone (doorbell) only count for 90 s
+    if (!a.profile && age > ANNOUNCE_FRESH) continue;
     if (a.profile && !(profile && (a.profile === String(profile.id) || a.profile.toLowerCase() === String(profile.name || '').toLowerCase()))) continue;
     const { profile: _p, ...rest } = a;
     return { ...rest, ageMs: now() - a.at };
@@ -1559,7 +1564,7 @@ route('POST', '/api/tv/handoff', 'profile', async (req, b, p, { profile, device 
 // signed in to that profile, the target TV is given a session for the same profile so it can resume straight away.
 route('GET', '/api/tv/handoff', 'device', async (req, b, p, ctx) => {
   const signedIn = profileOnDevice(req, ctx.device.id);
-  const announcement = currentAnnouncement(signedIn) || dailyFor(signedIn);
+  const announcement = dailyFor(signedIn) || currentAnnouncement(signedIn); // daily list first: it's only ever returned once
   const approval = approvalFor(signedIn);
   const badge = currentBadge();
   const h = handoffs.get(ctx.device.id);
