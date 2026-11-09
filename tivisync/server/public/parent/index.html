@@ -62,6 +62,12 @@ td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;vertic
 .q.def{background:#1d4ed8;color:#fff}
 .chsel{accent-color:var(--warn)}
 .req{border-color:var(--warn)}
+.camrow{padding:10px 0;border-top:1px solid var(--line)}
+.camline{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:4px 0}
+.camline input,.camline select{margin:0}
+.camline .ck{display:inline-flex;align-items:center;gap:3px;margin:0;font-size:13px;white-space:nowrap}
+.camline .ck input{width:auto;margin:0}
+.camline .days{display:inline-flex;flex-wrap:wrap;gap:6px}
 </style>
 </head>
 <body>
@@ -285,6 +291,9 @@ async function loadTvs() {
     `<div class="card"><h3>📢 Doorbell &amp; announcements</h3><p class="muted">When the doorbell rings, or Home Assistant sends the event <b>tivisync_announce</b> with a <b>message</b>, every TV pauses, shows it and reads it out.</p>
       <div id="annBox" class="muted">Checking…</div>
       <div class="row" style="margin-top:8px"><input id="annMsg" placeholder="Message to show on the TVs" style="flex:1"><button class="small" id="annSend">Send</button><button class="small" id="annBell">🔔 Test doorbell</button></div></div>` +
+    `<div class="card"><h3>📷 Camera alerts on the TVs</h3><p class="muted">When one of these sensors sees someone, every TV shows a small box in the top right for 5 seconds (it never pauses). Leave the times empty for all day, or set e.g. 22:00 to 06:30 – that runs over midnight. Untick days to skip them.</p>
+      <div id="camBox" class="muted">Loading…</div>
+      <div class="row" style="margin-top:8px"><button class="small" id="camAdd">+ Add alert</button><button class="small primary" id="camSave">Save alerts</button></div></div>` +
     `<div class="card"><h3>📲 App updates</h3><div id="appBox" class="muted">Loading…</div>
      <div class="row" style="margin-top:10px"><button class="small primary" id="appCheck">Check GitHub now</button>
      <label class="btn small" style="margin:0;cursor:pointer">Upload APK<input type="file" id="appFile" accept=".apk" style="display:none"></label></div>
@@ -309,6 +318,37 @@ async function loadTvs() {
   api('GET', '/api/admin/app').then(showApp).catch(() => {});
   api('GET', '/api/admin/announce').then((h) => { $('#annBox').innerHTML = h.connected ? `✅ Listening to Home Assistant${h.doorbell ? ` · doorbell <b>${esc(h.doorbell)}</b>` : ''}` : `⚠️ Not linked to Home Assistant${h.error ? ' – ' + esc(h.error) : ''} (test buttons still work)`; }).catch(() => {});
   $('#annSend').onclick = async () => { const m = $('#annMsg').value.trim(); if (!m) return; await api('POST', '/api/admin/announce', { message: m }); $('#annMsg').value = ''; toast('Sent to the TVs'); };
+  // --- camera alerts
+  let camData = { alerts: [], sensors: [] };
+  const DAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+  const camRow = (a, i) => {
+    const opts = camData.sensors.some((x) => x.entity === a.entity) || !a.entity ? camData.sensors : [{ entity: a.entity, name: a.entity + ' (not found)' }, ...camData.sensors];
+    return `<div class="camrow" data-cam="${i}">
+      <div class="camline"><label class="ck"><input type="checkbox" data-f="enabled" ${a.enabled !== false ? 'checked' : ''}> On</label>
+      <input data-f="name" value="${esc(a.name || '')}" placeholder="Name on the TV" style="width:140px">
+      <select data-f="entity" style="flex:1;min-width:180px"><option value="">Choose a sensor…</option>${opts.map((x) => `<option value="${esc(x.entity)}" ${x.entity === a.entity ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
+      <div class="camline"><span class="muted">From</span><input type="time" data-f="from" value="${esc(a.from || '')}" style="width:120px"><span class="muted">to</span><input type="time" data-f="to" value="${esc(a.to || '')}" style="width:120px">
+      <span class="days">${DAYS.map((d, n) => `<label class="ck"><input type="checkbox" data-day="${n}" ${!a.days || !a.days.length || a.days.includes(n) ? 'checked' : ''}>${d}</label>`).join('')}</span>
+      <button class="small" data-camtest="${i}">Test</button><button class="small bad" data-camdel="${i}">Remove</button></div></div>`;
+  };
+  const camRead = () => [...document.querySelectorAll('[data-cam]')].map((r) => {
+    const days = [...r.querySelectorAll('[data-day]')].filter((x) => x.checked).map((x) => +x.dataset.day);
+    return { id: camData.alerts[+r.dataset.cam]?.id, name: $('[data-f=name]', r).value, entity: $('[data-f=entity]', r).value, from: $('[data-f=from]', r).value, to: $('[data-f=to]', r).value,
+      days: days.length === 7 ? [] : days, enabled: $('[data-f=enabled]', r).checked };
+  });
+  const camDraw = () => {
+    $('#camBox').innerHTML = (camData.linked === false ? '<p>⚠️ Not linked to Home Assistant, so the sensor list is empty.</p>' : '') + (camData.alerts.length ? camData.alerts.map(camRow).join('') : '<p>No alerts yet.</p>');
+    document.querySelectorAll('[data-camdel]').forEach((b) => b.onclick = () => { camData.alerts = camRead(); camData.alerts.splice(+b.dataset.camdel, 1); camDraw(); });
+    document.querySelectorAll('[data-camtest]').forEach((b) => b.onclick = async () => { const a = camRead()[+b.dataset.camtest]; await api('POST', '/api/admin/badge', { camera: a.name || 'Camera' }); toast('Sent to the TVs'); });
+  };
+  api('GET', '/api/admin/camera-alerts').then((d) => { camData = d; camDraw(); }).catch((e) => { $('#camBox').textContent = e.message; });
+  $('#camAdd').onclick = () => { camData.alerts = camRead(); camData.alerts.push({ name: '', entity: '', from: '', to: '', days: [], enabled: true }); camDraw(); };
+  $('#camSave').onclick = async () => {
+    const list = camRead();
+    if (list.some((a) => !a.entity)) return toast('Choose a sensor for every alert');
+    if (list.some((a) => (a.from && !a.to) || (!a.from && a.to))) return toast('Set both times, or leave both empty');
+    try { const r = await api('PUT', '/api/admin/camera-alerts', { alerts: list }); camData.alerts = r.alerts; camDraw(); toast('Camera alerts saved'); } catch (e) { toast(e.message); }
+  };
   $('#annBell').onclick = async () => { await api('POST', '/api/admin/announce', { kind: 'doorbell' }); toast('Doorbell sent to the TVs'); };
   api('GET', '/api/admin/remote').then((r) => { $('#remBox').innerHTML = r.url
       ? `Phones and TVs use <b>${esc(r.url.replace('/api/tivisync', ''))}</b> when they can't reach your home network (${esc(r.source || '')}). Needs the TiviSync integration installed in Home Assistant.${r.error ? '<br>⚠️ ' + esc(r.error) : ''}`
