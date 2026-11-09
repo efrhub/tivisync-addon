@@ -1560,6 +1560,7 @@ async function api(req, res, url) {
       db[coll][id] = doc;
       if (newTick) { if (doc.pending) askToCheck(id, doc); else creditTv(doc, 1, doc.extra ? 'extra job' : 'chore'); }
       /* Admins hear when a chore is done, unless they ticked it themselves. */
+      if (newTick) haEvent('tivisync_job_done', { who: db.members[doc.by]?.name || user.name, title: doc.title }).catch(() => {}); // small ✅ box on the chosen TVs
       if (newTick) { const who = db.members[doc.by]?.name || user.name; for (const [aid, al] of Object.entries(db.logins)) if (al.admin && aid !== user.id) notify(aid, 'clock', { title: doc.extra ? 'Extra job done' : 'Chore done', body: doc.extra ? `${who} did an extra job: ${doc.title}.` : `${who} has done ${doc.title}.`, url: '/#today', tag: `done-${id}` }); }
       if (coll === 'log') pruneLog();
       save(); broadcast(PRIVATE.includes(coll) ? { coll: 'logins' } : { coll, id, doc });
