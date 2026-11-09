@@ -26,3 +26,10 @@ event_data:
 When a child's TV time runs out they can ask for more on the TV. Adults get an alert on their phones (the Home Assistant app, set in **notify_services**, e.g. `mobile_app_home_47`) with +30 min / +1 hour / No, and a pop-up on any TV where an adult profile is signed in with +15 / +30 / +1 hour / No. The first answer wins and the other alerts disappear.
 
 Family Planner uses the same alerts to check extra jobs, and adds TV time for chores that are done (event `tivisync_bonus` with `profile` and `minutes`).
+
+## Want to watch, watched and scores (1.10.0, app build 30)
+
+- **Want to watch:** on any film or series page press **＋ Want to watch**. Each profile has its own list, shown as a row on the Home screen on every TV. Films drop off the list once watched; series once every episode is watched.
+- **Watched:** anything played past 92% is marked watched automatically. You can also use **✓ Mark watched / ↺ Mark unwatched** on a film, the season and series buttons on a series page, or press right on an episode for its own tick. Fully watched series get a ✓ on their poster.
+- **Score:** film and series pages show the public TMDB score (out of 10, with the number of votes).
+- **Age ratings:** the UK certificate is used first, then US / Ireland / Australia / Germany. If none of those exist, the age most other countries agree on is used (shown with its country, e.g. "Rated 12 (12 FR)"). Titles that had no rating are looked up again automatically after updating. Anything still missing can be set by hand in the panel's Ratings page.

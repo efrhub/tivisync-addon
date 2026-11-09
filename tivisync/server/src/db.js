@@ -175,6 +175,13 @@ for (const sql of [
   // diagnostic log lines sent by the TV / phone apps (kept 7 days)
   'CREATE TABLE IF NOT EXISTS device_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER NOT NULL, ts INTEGER NOT NULL, level TEXT NOT NULL, tag TEXT NOT NULL, msg TEXT NOT NULL)',
   'CREATE INDEX IF NOT EXISTS device_logs_dev_ts ON device_logs (device_id, ts)',
+  // public TMDB score per title (0 = none yet)
+  'ALTER TABLE title_ratings ADD COLUMN score REAL',
+  'ALTER TABLE title_ratings ADD COLUMN votes INTEGER',
+  // "Want to watch" list per profile (same shape as favourites)
+  'CREATE TABLE IF NOT EXISTS watchlist (profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE, item_key TEXT NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (profile_id, item_key))',
+  // episode count per series (reported by the TV) so a fully watched series can show a tick
+  'CREATE TABLE IF NOT EXISTS series_totals (source_id INTEGER NOT NULL, series_id TEXT NOT NULL, total INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (source_id, series_id))',
 ]) {
   try { db.exec(sql); } catch { /* already exists */ }
 }

@@ -1,6 +1,7 @@
-# TiviSync – Home Assistant add-on
+# Baglietto Apps – Home Assistant add-ons
 
-Sync server and parental controls for the TiviSync Android TV / phone app.
+- **TiviSync** – sync server and parental controls for the TiviSync Android TV / phone app.
+- **Family Planner** – household chores, schedules, dinners and shopping list.
 
 Add this repository in Home Assistant: **Settings › Apps › App store › ⋮ › Repositories** and paste
 `https://github.com/efrhub/tivisync-addon`.

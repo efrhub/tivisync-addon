@@ -1056,12 +1056,43 @@ route('PUT', '/api/tv/progress', 'profile', async (req, b, p, { profile, device 
     .run(profile.id, String(b.key), String(b.type), b.sourceId ?? null, b.streamId != null ? String(b.streamId) : null,
       b.seriesId != null ? String(b.seriesId) : null, b.season ?? null, b.episode ?? null, b.title ?? null, b.seriesTitle ?? null,
       b.poster ?? null, b.url ?? null, pos, dur, watched, now(), device.id);
+  if (watched) dropWatched(profile.id, b.sourceId, String(b.type), b.streamId, b.seriesId);
   return { ok: true, watched: !!watched };
 });
 
 route('DELETE', '/api/tv/progress', 'profile', async (req, b, p, { profile }) => {
   db.prepare('DELETE FROM progress WHERE profile_id = ? AND item_key = ?').run(profile.id, String(b.key || ''));
   return { ok: true };
+});
+
+// mark several episodes watched at once (a whole season / series). Items already watched keep their date.
+route('PUT', '/api/tv/progress/many', 'profile', async (req, b, p, { profile, device }) => {
+  const items = Array.isArray(b.items) ? b.items.slice(0, 2000) : [];
+  const ins = db.prepare(`INSERT INTO progress (profile_id, item_key, type, source_id, stream_id, series_id, season, episode, title, series_title, poster, url,
+      position_ms, duration_ms, watched, updated_at, device_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,0,1,?,?)
+    ON CONFLICT(profile_id, item_key) DO UPDATE SET watched = 1, position_ms = 0, updated_at = CASE WHEN progress.watched = 1 THEN progress.updated_at ELSE excluded.updated_at END`);
+  const t = now();
+  db.exec('BEGIN');
+  try {
+    items.forEach((it, i) => {
+      if (!it?.key || !it?.type) return;
+      ins.run(profile.id, String(it.key), String(it.type), it.sourceId ?? null, it.streamId != null ? String(it.streamId) : null,
+        it.seriesId != null ? String(it.seriesId) : null, it.season ?? null, it.episode ?? null, it.title ?? null, it.seriesTitle ?? null,
+        it.poster ?? null, it.url ?? null, t - (items.length - i), device.id); // keeps episode order for "next up"
+    });
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+  const last = items[items.length - 1];
+  if (last) dropWatched(profile.id, last.sourceId, String(last.type), last.streamId, last.seriesId);
+  return { ok: true, count: items.length };
+});
+// mark episodes unwatched: { sourceId, seriesId, season? } – a season, or the whole series
+route('DELETE', '/api/tv/progress/series', 'profile', async (req, b, p, { profile }) => {
+  const args = [profile.id, Number(b.sourceId), String(b.seriesId || '')];
+  const r = b.season != null
+    ? db.prepare(`DELETE FROM progress WHERE profile_id = ? AND source_id = ? AND series_id = ? AND type = 'episode' AND season = ?`).run(...args, Number(b.season))
+    : db.prepare(`DELETE FROM progress WHERE profile_id = ? AND source_id = ? AND series_id = ? AND type = 'episode'`).run(...args);
+  return { ok: true, removed: r.changes };
 });
 
 // --- favourites ---
@@ -1230,7 +1261,7 @@ async function syncLibraries(force = false) {
       db.exec('COMMIT');
     } catch (e) { db.exec('ROLLBACK'); throw e; }
     // titles flagged adult by the provider are 18 without asking TMDB
-    for (const m of lib.movies) if (m.adult) db.prepare(`UPDATE title_ratings SET age = 18, cert = '18', status = 'rated', checked_at = ? WHERE source_id = ? AND kind = 'movie' AND ref = ? AND status != 'manual'`).run(now(), src.id, m.ref);
+    for (const m of lib.movies) if (m.adult) db.prepare(`UPDATE title_ratings SET age = 18, cert = '18', country = 'provider', status = 'rated', checked_at = ? WHERE source_id = ? AND kind = 'movie' AND ref = ? AND status != 'manual'`).run(now(), src.id, m.ref);
   }
 }
 
@@ -1240,19 +1271,30 @@ async function rateTitles() {
   ratingRun = { running: true, at: now(), done: 0, error: null };
   try {
     await syncLibraries();
-    const upd = db.prepare('UPDATE title_ratings SET tmdb_id = ?, cert = ?, country = ?, age = ?, status = ?, checked_at = ? WHERE source_id = ? AND kind = ? AND ref = ?');
+    // 1.10: other countries' certificates are now used too, so titles that had none get looked up again once
+    if (getSetting('ratings_v2') !== '1') {
+      db.prepare(`UPDATE title_ratings SET status = 'pending' WHERE status IN ('none','error')`).run();
+      setSetting('ratings_v2', '1');
+    }
+    const upd = db.prepare('UPDATE title_ratings SET tmdb_id = ?, cert = ?, country = ?, age = ?, status = ?, checked_at = ?, score = ?, votes = ? WHERE source_id = ? AND kind = ? AND ref = ?');
+    const updScore = db.prepare('UPDATE title_ratings SET tmdb_id = COALESCE(?, tmdb_id), score = ?, votes = ? WHERE source_id = ? AND kind = ? AND ref = ?');
     for (;;) {
-      const batch = db.prepare(`SELECT * FROM title_ratings WHERE status = 'pending' OR (status IN ('none','error') AND checked_at < ?) LIMIT 40`).all(now() - 30 * 86400_000);
+      const batch = db.prepare(`SELECT * FROM title_ratings WHERE status = 'pending' OR (status IN ('none','error') AND checked_at < ?)
+        OR (status IN ('rated','manual') AND score IS NULL) LIMIT 40`).all(now() - 30 * 86400_000);
       if (!batch.length) break;
       await Promise.all([0, 1, 2, 3].map(async (w) => {
         for (let i = w; i < batch.length; i += 4) {
           const t = batch[i];
+          const keep = t.status === 'manual' || (t.status === 'rated' && (t.country === 'adult' || t.country === 'provider')); // ages set by hand / by the provider stay
           try {
             const r = await ratings.lookup(tmdb, t.kind, { name: t.name, year: t.year, tmdb: t.tmdb_id });
-            upd.run(r?.tmdbId ?? t.tmdb_id ?? null, r?.cert ?? null, r?.country ?? null, r?.age ?? null, r?.age != null ? 'rated' : 'none', now(), t.source_id, t.kind, t.ref);
+            if (keep || (t.status === 'rated' && r?.age == null)) updScore.run(r?.tmdbId ?? null, r?.score ?? 0, r?.votes ?? 0, t.source_id, t.kind, t.ref);
+            else upd.run(r?.tmdbId ?? t.tmdb_id ?? null, r?.cert ?? null, r?.country ?? null, r?.age ?? null, r?.age != null ? 'rated' : 'none', now(),
+              r ? (r.score ?? 0) : null, r ? (r.votes ?? 0) : null, t.source_id, t.kind, t.ref);
           } catch (e) {
             if (/TMDB 429/.test(e.message)) await new Promise((res) => setTimeout(res, 5000));
-            upd.run(t.tmdb_id ?? null, null, null, null, 'error', now(), t.source_id, t.kind, t.ref);
+            if (t.status === 'rated' || t.status === 'manual') updScore.run(null, 0, 0, t.source_id, t.kind, t.ref);
+            else upd.run(t.tmdb_id ?? null, null, null, null, 'error', now(), null, null, t.source_id, t.kind, t.ref);
             ratingRun.error = e.message;
           }
           ratingRun.done++;
@@ -1295,6 +1337,57 @@ route('GET', '/api/tv/ratings', 'profile', async (req, b, p, { profile }) => {
   const movies = {}, series = {};
   for (const r of db.prepare(`SELECT kind, ref, age FROM title_ratings WHERE source_id = ? AND age IS NOT NULL`).all(sourceId)) (r.kind === 'movie' ? movies : series)[r.ref] = r.age;
   return { maxAge: profile.max_age ?? null, hideUnrated: true, movies, series };
+});
+
+// one title's details for the film / series page: age certificate + public TMDB score
+route('GET', '/api/tv/title', 'profile', async (req) => {
+  const u = new URL(req.url, 'http://x').searchParams;
+  const r = db.prepare('SELECT * FROM title_ratings WHERE source_id = ? AND kind = ? AND ref = ?').get(Number(u.get('sourceId')), String(u.get('kind')), String(u.get('ref') || ''));
+  if (!r) return { age: null, label: null, cert: null, country: null, score: null, votes: null };
+  return { age: r.age, label: ratings.AGE_LABEL(r.age), cert: r.cert, country: r.country, score: r.score || null, votes: r.votes || null, tmdbId: r.tmdb_id };
+});
+
+// --- "Want to watch" list (per profile, follows them to every TV) ---
+route('GET', '/api/tv/watchlist', 'profile', async (req, b, p, { profile }) =>
+  db.prepare('SELECT item_key, data FROM watchlist WHERE profile_id = ? ORDER BY created_at DESC').all(profile.id)
+    .map((r) => ({ key: r.item_key, ...JSON.parse(r.data) })));
+route('POST', '/api/tv/watchlist', 'profile', async (req, b, p, { profile }) => {
+  if (!b.key) throw new HttpError(400, 'key required');
+  const { key, ...data } = b;
+  db.prepare('INSERT OR REPLACE INTO watchlist (profile_id, item_key, data, created_at) VALUES (?,?,?,?)').run(profile.id, String(key), JSON.stringify(data), now());
+  return { ok: true };
+});
+route('DELETE', '/api/tv/watchlist', 'profile', async (req, b, p, { profile }) => {
+  db.prepare('DELETE FROM watchlist WHERE profile_id = ? AND item_key = ?').run(profile.id, String(b.key || ''));
+  return { ok: true };
+});
+
+// --- fully watched series (for the ✓ on series posters) ---
+function seriesDone(profileId, sourceId, seriesId) {
+  const t = db.prepare('SELECT total FROM series_totals WHERE source_id = ? AND series_id = ?').get(sourceId, String(seriesId));
+  if (!t || t.total <= 0) return false;
+  const n = db.prepare(`SELECT COUNT(*) n FROM progress WHERE profile_id = ? AND source_id = ? AND series_id = ? AND type = 'episode' AND watched = 1`).get(profileId, sourceId, String(seriesId)).n;
+  return n >= t.total;
+}
+/** A finished film / series drops off the profile's "Want to watch" list. */
+function dropWatched(profileId, sourceId, type, streamId, seriesId) {
+  if (type === 'movie' && streamId != null) db.prepare('DELETE FROM watchlist WHERE profile_id = ? AND item_key = ?').run(profileId, `${sourceId}:movie:${streamId}`);
+  if (type === 'episode' && seriesId != null && seriesDone(profileId, sourceId, seriesId))
+    db.prepare('DELETE FROM watchlist WHERE profile_id = ? AND item_key = ?').run(profileId, `${sourceId}:series:${seriesId}`);
+}
+// the TV reports how many episodes a series has whenever its page is opened
+route('POST', '/api/tv/series-total', 'profile', async (req, b, p, { profile }) => {
+  const sourceId = Number(b.sourceId); const seriesId = String(b.seriesId || ''); const total = Math.max(0, Number(b.total) | 0);
+  if (!sourceId || !seriesId) throw new HttpError(400, 'sourceId and seriesId required');
+  db.prepare(`INSERT INTO series_totals (source_id, series_id, total, updated_at) VALUES (?,?,?,?)
+    ON CONFLICT(source_id, series_id) DO UPDATE SET total = excluded.total, updated_at = excluded.updated_at`).run(sourceId, seriesId, total, now());
+  return { done: seriesDone(profile.id, sourceId, seriesId) };
+});
+route('GET', '/api/tv/series-done', 'profile', async (req, b, p, { profile }) => {
+  const sourceId = Number(new URL(req.url, 'http://x').searchParams.get('sourceId'));
+  const rows = db.prepare(`SELECT t.series_id, t.total, (SELECT COUNT(*) FROM progress pr WHERE pr.profile_id = ? AND pr.source_id = t.source_id
+      AND pr.series_id = t.series_id AND pr.type = 'episode' AND pr.watched = 1) n FROM series_totals t WHERE t.source_id = ?`).all(profile.id, sourceId);
+  return rows.filter((r) => r.total > 0 && r.n >= r.total).map((r) => r.series_id);
 });
 
 // --- channel manager: per-profile channel ticks + merged qualities ---

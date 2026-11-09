@@ -139,7 +139,7 @@ async function libraryFor(src, { force = false, filesDir, hosted } = {}) {
 
 // ------------------------------------------------------------------ TMDB lookup
 
-/** Returns { tmdbId, cert, country, age } or null when nothing reliable was found. */
+/** Returns { tmdbId, cert, country, age, score, votes } or null when nothing reliable was found. */
 async function lookup(tmdb, kind, item) {
   const { title, year } = cleanTitle(item.name);
   const y = item.year || year;
@@ -165,28 +165,40 @@ async function lookup(tmdb, kind, item) {
     const d = await tmdb(`/movie/${id}`, { append_to_response: 'release_dates' });
     if (d.adult) return { tmdbId: id, cert: '18', country: 'adult', age: 18 };
     const rel = d.release_dates?.results || [];
-    for (const country of ['GB', 'US', 'IE', 'AU', 'DE']) {
-      const r = rel.find((x) => x.iso_3166_1 === country);
-      const cert = (r?.release_dates || []).map((x) => x.certification).find((c) => c && c.trim());
-      const age = certToAge(cert, country);
-      if (age != null) return { tmdbId: id, cert, country, age };
-    }
-    return { tmdbId: id, cert: null, country: null, age: null };
+    const certs = rel.map((r) => ({ country: r.iso_3166_1, cert: (r.release_dates || []).map((x) => x.certification).find((c) => c && c.trim()) }));
+    return { tmdbId: id, ...pickCert(certs), ...scoreOf(d) };
   }
   const d = await tmdb(`/tv/${id}`, { append_to_response: 'content_ratings' });
   if (d.adult) return { tmdbId: id, cert: '18', country: 'adult', age: 18 };
   const cr = d.content_ratings?.results || [];
-  for (const country of ['GB', 'US', 'IE', 'AU', 'DE']) {
-    const cert = cr.find((x) => x.iso_3166_1 === country)?.rating;
-    const age = certToAge(cert, country);
-    if (age != null) return { tmdbId: id, cert, country, age };
-  }
-  return { tmdbId: id, cert: null, country: null, age: null };
+  return { tmdbId: id, ...pickCert(cr.map((x) => ({ country: x.iso_3166_1, cert: x.rating }))), ...scoreOf(d) };
 }
+
+const PREFERRED = ['GB', 'US', 'IE', 'AU', 'DE'];
+/** UK certificate first, then US/IE/AU/DE; failing those, the age most other countries agree on (ties -> the older age). */
+function pickCert(certs) {
+  for (const country of PREFERRED) {
+    const c = certs.find((x) => x.country === country);
+    const age = certToAge(c?.cert, country);
+    if (age != null) return { cert: c.cert, country, age };
+  }
+  const votes = new Map();
+  for (const c of certs) {
+    if (PREFERRED.includes(c.country)) continue;
+    const age = certToAge(c.cert, c.country);
+    if (age == null) continue;
+    const v = votes.get(age) || { n: 0, cert: c.cert, country: c.country };
+    v.n++; votes.set(age, v);
+  }
+  if (!votes.size) return { cert: null, country: null, age: null };
+  const [age, v] = [...votes.entries()].sort((a, b) => b[1].n - a[1].n || b[0] - a[0])[0];
+  return { cert: v.cert, country: v.country, age };
+}
+const scoreOf = (d) => ({ score: Number(d.vote_average) || 0, votes: Number(d.vote_count) || 0 });
 
 // ------------------------------------------------------------------ adult channels (for limited profiles)
 
 const ADULT = /(\bxxx\b|\badult|18\s*\+|\+\s*18|\bporn|\bplayboy|\bpenthouse|\bhustler|\bbrazzers|\bdorcel|\bvivid\b|\bredlight|\bbabestation|\bfor adults|\berotic|\bsexy?\b|\bxx\b)/i;
 const isAdultChannel = (name, category) => ADULT.test(name || '') || ADULT.test(category || '');
 
-module.exports = { certToAge, AGE_LABEL, cleanTitle, parseM3uLibrary, libraryFor, lookup, isAdultChannel, libCache };
+module.exports = { pickCert, certToAge, AGE_LABEL, cleanTitle, parseM3uLibrary, libraryFor, lookup, isAdultChannel, libCache };
