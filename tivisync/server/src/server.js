@@ -859,6 +859,25 @@ function currentAnnouncement(profile = null) {
   }
   return null;
 }
+// Small "someone's at the front door" style badge in the corner of every TV. Never pauses or speaks.
+// HA event tivisync_badge { camera: 'Front door', icon?: '🚶', seconds?: 5 }. Same camera at most every 20 s.
+const badges = [];
+function addBadge(d = {}) {
+  const camera = String(d.camera || d.title || 'Camera').trim().slice(0, 40);
+  const at = now();
+  if (badges.some((b) => b.camera.toLowerCase() === camera.toLowerCase() && at - b.at < 20_000)) return null;
+  const b = { id: `b${at}-${Math.random().toString(36).slice(2, 6)}`, at, camera,
+    icon: String(d.icon || '🚶').slice(0, 8), seconds: Math.min(30, Math.max(2, Number(d.seconds) || 5)) };
+  badges.push(b);
+  while (badges.length > 10) badges.shift();
+  console.log(`Badge: ${b.icon} ${b.camera}`);
+  return b;
+}
+function currentBadge() {
+  const b = badges[badges.length - 1];
+  return b && now() - b.at < 12_000 ? { id: b.id, camera: b.camera, icon: b.icon, seconds: b.seconds } : null;
+}
+
 // Today's reminders for a profile (sent by Family Planner as tivisync_announce with daily: true). They pop up once,
 // on that profile's first sign-in of the day; a later update the same day is kept but not shown again.
 const dailyNotes = new Map(); // profile (id or name, lower case) -> { date, title, message }
@@ -898,7 +917,7 @@ function startHaListener() {
       else if (m.type === 'auth_invalid') { haLive.error = 'Home Assistant refused the add-on token'; ws.close(); }
       else if (m.type === 'auth_ok') {
         haLive.connected = true; haLive.error = null; haLive.since = now();
-        for (const t of ['tivisync_announce', 'tivisync_approval', 'tivisync_approval_cancel', 'tivisync_bonus', 'mobile_app_notification_action'])
+        for (const t of ['tivisync_announce', 'tivisync_badge', 'tivisync_approval', 'tivisync_approval_cancel', 'tivisync_bonus', 'mobile_app_notification_action'])
           ws.send(JSON.stringify({ id: ++id, type: 'subscribe_events', event_type: t }));
         if (doorbell) ws.send(JSON.stringify({ id: ++id, type: 'subscribe_trigger', trigger: { platform: 'state', entity_id: doorbell, to: 'on' } }));
       } else if (m.type === 'result' && !m.success) {
@@ -916,6 +935,8 @@ function startHaListener() {
         } else if (e.event_type === 'mobile_app_notification_action') {
           const m = /^TVS\|([^|]+)\|(.+)$/.exec(String(d0.action || ''));
           if (m) { try { answerApproval(m[1], m[2], 'a phone'); } catch (err) { console.warn(err.message); } }
+        } else if (e.event_type === 'tivisync_badge') {
+          addBadge(d0);
         } else if (e.event_type === 'tivisync_announce') {
           const d = e.data || {};
           if (d.daily) { setDailyNote(d.profile, d); return; }
@@ -938,6 +959,7 @@ route('GET', '/api/internal/profiles', 'none', async (req) => {
   if (!/^172\.30\.3[23]\.\d+$/.test(ra) || ra === '172.30.32.1') throw new HttpError(403, 'Only available to Home Assistant add-ons');
   return db.prepare('SELECT id, name FROM profiles ORDER BY name').all();
 });
+route('POST', '/api/admin/badge', 'admin', async (req, b) => ({ ok: true, badge: addBadge(b) }));
 route('GET', '/api/admin/announce', 'admin', async () => ({ ...haLive, latest: currentAnnouncement() }));
 route('POST', '/api/admin/announce', 'admin', async (req, b) => {
   const kind = b.kind === 'doorbell' ? 'doorbell' : 'message';
@@ -1539,15 +1561,16 @@ route('GET', '/api/tv/handoff', 'device', async (req, b, p, ctx) => {
   const signedIn = profileOnDevice(req, ctx.device.id);
   const announcement = currentAnnouncement(signedIn) || dailyFor(signedIn);
   const approval = approvalFor(signedIn);
+  const badge = currentBadge();
   const h = handoffs.get(ctx.device.id);
-  if (!h) return { handoff: null, partyInvite: partyInviteFor(ctx.device.id), announcement, approval };
+  if (!h) return { handoff: null, partyInvite: partyInviteFor(ctx.device.id), announcement, approval, badge };
   handoffs.delete(ctx.device.id);
-  if (now() - h.at > HANDOFF_TTL) return { handoff: null, announcement, approval };
+  if (now() - h.at > HANDOFF_TTL) return { handoff: null, announcement, approval, badge };
   const prof = db.prepare('SELECT * FROM profiles WHERE id = ?').get(h.profileId);
-  if (!prof) return { handoff: null, announcement, approval };
+  if (!prof) return { handoff: null, announcement, approval, badge };
   const t = token();
   db.prepare('INSERT INTO profile_sessions (token, profile_id, device_id, created_at) VALUES (?,?,?,?)').run(t, prof.id, ctx.device.id, now());
-  return { handoff: h, profileToken: t, profile: profileRow(prof), allowance: allowance(prof.id), announcement, approval };
+  return { handoff: h, profileToken: t, profile: profileRow(prof), allowance: allowance(prof.id), announcement, approval, badge };
 });
 
 // An adult answering a request on a TV.
