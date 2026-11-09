@@ -907,6 +907,49 @@ function profileOnDevice(req, deviceId) {
   const s = pt && db.prepare('SELECT profile_id FROM profile_sessions WHERE token = ? AND device_id = ?').get(pt, deviceId);
   return s ? db.prepare('SELECT id, name, is_child FROM profiles WHERE id = ?').get(s.profile_id) : null;
 }
+// Camera alerts: Home Assistant sensors that put a small badge on the TVs, set up in the parent panel
+// (📷 Camera alerts). Each has a name, a sensor, an optional time window (e.g. 22:00-06:30, over midnight is fine)
+// and optional days (0 = Sunday … 6 = Saturday; none = every day).
+const DEFAULT_CAMERAS = [['Front door', 'binary_sensor.doorbell_person'], ['Side alley', 'binary_sensor.side_alley_person'],
+  ['Garden', 'binary_sensor.garden_person'], ['Rear garden', 'binary_sensor.rear_garden_person']];
+function cleanAlert(a, i = 0) {
+  const t = (v) => (/^\d{1,2}:\d{2}$/.test(String(v || '').trim()) ? String(v).trim().padStart(5, '0') : '');
+  const entity = String(a.entity || '').trim().toLowerCase();
+  if (!/^[a-z_]+\.[a-z0-9_]+$/.test(entity)) return null;
+  return { id: String(a.id || `c${Date.now().toString(36)}${i}`).slice(0, 30), name: String(a.name || 'Camera').trim().slice(0, 40) || 'Camera', entity,
+    from: t(a.from), to: t(a.to), days: Array.isArray(a.days) ? [...new Set(a.days.map(Number).filter((d) => d >= 0 && d <= 6))].sort() : [],
+    enabled: a.enabled !== false };
+}
+function cameraAlerts() {
+  const saved = getSetting('camera_alerts');
+  if (saved) { try { return JSON.parse(saved); } catch { /* fall through */ } }
+  return DEFAULT_CAMERAS.map(([name, entity], i) => cleanAlert({ name, entity, id: `c${i}` }));
+}
+function inWindow(a, d = new Date()) {
+  if (a.days && a.days.length && !a.days.includes(d.getDay())) {
+    // a window that started yesterday evening and runs past midnight still counts for yesterday's day
+    if (!(a.from && a.to && a.from > a.to && `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` < a.to && a.days.includes((d.getDay() + 6) % 7))) return false;
+  }
+  if (!a.from || !a.to) return true;
+  const t = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return a.from <= a.to ? t >= a.from && t < a.to : t >= a.from || t < a.to;
+}
+const camSubs = new Map();
+let doorbellSub = null;
+let haSock = null, haSockNextId = () => 0;
+// (re)subscribe to the camera sensors on the open Home Assistant connection
+function subscribeCameras() {
+  const ws = haSock;
+  if (!ws || ws.readyState !== 1) return;
+  for (const sid of camSubs.keys()) ws.send(JSON.stringify({ id: haSockNextId(), type: 'unsubscribe_events', subscription: sid }));
+  camSubs.clear();
+  for (const c of cameraAlerts()) {
+    if (!c.enabled) continue;
+    const sid = haSockNextId();
+    camSubs.set(sid, c);
+    ws.send(JSON.stringify({ id: sid, type: 'subscribe_trigger', trigger: { platform: 'state', entity_id: c.entity, to: 'on' } }));
+  }
+}
 function startHaListener() {
   const token = process.env.SUPERVISOR_TOKEN;
   if (!token || typeof WebSocket === 'undefined') return;
@@ -924,7 +967,10 @@ function startHaListener() {
         haLive.connected = true; haLive.error = null; haLive.since = now();
         for (const t of ['tivisync_announce', 'tivisync_badge', 'tivisync_approval', 'tivisync_approval_cancel', 'tivisync_bonus', 'mobile_app_notification_action'])
           ws.send(JSON.stringify({ id: ++id, type: 'subscribe_events', event_type: t }));
-        if (doorbell) ws.send(JSON.stringify({ id: ++id, type: 'subscribe_trigger', trigger: { platform: 'state', entity_id: doorbell, to: 'on' } }));
+        camSubs.clear(); doorbellSub = null;
+        if (doorbell) { doorbellSub = ++id; ws.send(JSON.stringify({ id: doorbellSub, type: 'subscribe_trigger', trigger: { platform: 'state', entity_id: doorbell, to: 'on' } })); }
+        haSock = ws; haSockNextId = () => ++id;
+        subscribeCameras();
       } else if (m.type === 'result' && !m.success) {
         haLive.error = m.error?.message || 'subscription refused';
       } else if (m.type === 'event' && m.event) {
@@ -946,7 +992,10 @@ function startHaListener() {
           const d = e.data || {};
           if (d.daily) { setDailyNote(d.profile, d); return; }
           announce(d.kind === 'doorbell' ? 'doorbell' : 'message', d.message, { title: d.title, pause: d.pause, speak: d.speak, profile: d.profile });
-        } else if (e.variables?.trigger) {
+        } else if (e.variables?.trigger && camSubs.has(m.id)) {
+          const c = camSubs.get(m.id);
+          if (inWindow(c)) addBadge({ camera: c.name });
+        } else if (e.variables?.trigger && (doorbellSub === null || m.id === doorbellSub)) {
           announce('doorbell', '');
         }
       }
@@ -963,6 +1012,25 @@ route('GET', '/api/internal/profiles', 'none', async (req) => {
   const ra = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
   if (!/^172\.30\.3[23]\.\d+$/.test(ra) || ra === '172.30.32.1') throw new HttpError(403, 'Only available to Home Assistant add-ons');
   return db.prepare('SELECT id, name FROM profiles ORDER BY name').all();
+});
+route('GET', '/api/admin/camera-alerts', 'admin', async () => {
+  let sensors = [];
+  const token = process.env.SUPERVISOR_TOKEN;
+  if (token) {
+    try {
+      const r = await fetch('http://supervisor/core/api/states', { headers: { Authorization: `Bearer ${token}` } });
+      if (r.ok) sensors = (await r.json()).filter((x) => x.entity_id.startsWith('binary_sensor.') && (/_(person|motion|visitor|vehicle|animal|pet|people|human)(_\d+)?$/.test(x.entity_id)
+        || ['motion', 'occupancy', 'presence'].includes(x.attributes?.device_class))).map((x) => ({ entity: x.entity_id, name: x.attributes?.friendly_name || x.entity_id }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch { /* not linked */ }
+  }
+  return { alerts: cameraAlerts(), sensors, linked: haLive.connected };
+});
+route('PUT', '/api/admin/camera-alerts', 'admin', async (req, b) => {
+  const alerts = (Array.isArray(b.alerts) ? b.alerts : []).slice(0, 30).map(cleanAlert).filter(Boolean);
+  setSetting('camera_alerts', JSON.stringify(alerts));
+  subscribeCameras();
+  return { ok: true, alerts };
 });
 route('POST', '/api/admin/badge', 'admin', async (req, b) => ({ ok: true, badge: addBadge(b) }));
 route('GET', '/api/admin/announce', 'admin', async () => ({ ...haLive, latest: currentAnnouncement() }));
