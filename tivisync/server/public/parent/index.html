@@ -294,6 +294,9 @@ async function loadTvs() {
     `<div class="card"><h3>📷 Camera alerts on the TVs</h3><p class="muted">When one of these sensors sees someone, every TV shows a small box in the top right for 5 seconds (it never pauses). Leave the times empty for all day, or set e.g. 22:00 to 06:30 – that runs over midnight. Untick days to skip them.</p>
       <div id="camBox" class="muted">Loading…</div>
       <div class="row" style="margin-top:8px"><button class="small" id="camAdd">+ Add alert</button><button class="small primary" id="camSave">Save alerts</button></div></div>` +
+    `<div class="card"><h3>✅ Job done alerts</h3><p class="muted">When someone ticks off a job in Family Planner, a small box (e.g. "✅ Lisa – Done: Empty the dishwasher") shows for a few seconds on the TVs where these profiles are signed in.</p>
+      <div id="jobBox" class="camline">Loading…</div>
+      <div class="row" style="margin-top:8px"><button class="small primary" id="jobSave">Save</button><button class="small" id="jobTest">Test</button></div></div>` +
     `<div class="card"><h3>📲 App updates</h3><div id="appBox" class="muted">Loading…</div>
      <div class="row" style="margin-top:10px"><button class="small primary" id="appCheck">Check GitHub now</button>
      <label class="btn small" style="margin:0;cursor:pointer">Upload APK<input type="file" id="appFile" accept=".apk" style="display:none"></label></div>
@@ -318,6 +321,12 @@ async function loadTvs() {
   api('GET', '/api/admin/app').then(showApp).catch(() => {});
   api('GET', '/api/admin/announce').then((h) => { $('#annBox').innerHTML = h.connected ? `✅ Listening to Home Assistant${h.doorbell ? ` · doorbell <b>${esc(h.doorbell)}</b>` : ''}` : `⚠️ Not linked to Home Assistant${h.error ? ' – ' + esc(h.error) : ''} (test buttons still work)`; }).catch(() => {});
   $('#annSend').onclick = async () => { const m = $('#annMsg').value.trim(); if (!m) return; await api('POST', '/api/admin/announce', { message: m }); $('#annMsg').value = ''; toast('Sent to the TVs'); };
+  // --- job done alerts
+  Promise.all([api('GET', '/api/admin/job-alerts'), api('GET', '/api/admin/overview')]).then(([ja, ov]) => {
+    $('#jobBox').innerHTML = ov.profiles.map((p) => `<label class="ck"><input type="checkbox" data-jp="${p.id}" ${ja.profiles.includes(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`).join('') || 'No profiles yet.';
+  }).catch((e) => { $('#jobBox').textContent = e.message; });
+  $('#jobSave').onclick = async () => { const ids = [...document.querySelectorAll('[data-jp]')].filter((x) => x.checked).map((x) => +x.dataset.jp); await api('PUT', '/api/admin/job-alerts', { profiles: ids }); toast('Saved'); };
+  $('#jobTest').onclick = async () => { const r = await api('POST', '/api/admin/job-done', { who: 'Test', title: 'Empty the dishwasher' }); toast(r.badge ? 'Sent to those TVs' : 'Tick at least one profile and Save first'); };
   // --- camera alerts
   let camData = { alerts: [], sensors: [] };
   const DAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
