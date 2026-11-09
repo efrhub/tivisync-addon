@@ -1202,8 +1202,40 @@ async function systemApi(req, res, route, user) {
 async function api(req, res, url) {
   const route = url.pathname.slice(5).split('/').filter(Boolean);
   const method = req.method;
+  /* TiviSync asks for someone's outstanding chores when they sign in on a TV. Home Assistant's add-on network only. */
+  if (route[0] === 'internal' && route[1] === 'tv-status' && method === 'GET') {
+    if (!/^(::ffff:)?172\.3[0-3]\./.test(req.socket.remoteAddress || '')) return fail(res, 403, 'Request refused.');
+    const want = String(url.searchParams.get('profile') || '').trim().toLowerCase();
+    const hit = Object.entries(db.logins).find(([id, l]) => l.tivisync && db.members[id] && (String(l.tivisync).toLowerCase() === want
+      || (db.members[id].name || '').trim().toLowerCase() === want));
+    if (!want || !hit) return send(res, 200, { linked: false, chores: [] });
+    const [id, l] = hit;
+    const r = remindersFor({ id, ...activeRoles(l) });
+    const chores = r.ids.filter(cid => db.chores[cid]).map(cid => db.chores[cid].title);
+    return send(res, 200, { linked: true, name: db.members[id].name, chores });
+  }
   /* Browsers can't send this header across sites without permission, which blocks forged requests. */
   if (method !== 'GET' && req.headers['x-rota'] !== '1') return fail(res, 403, 'Request refused.');
+
+  /* First set-up only: load a backup sent from the Home Assistant sidebar (e.g. copied from the old Family Planner).
+   * Refused once anyone has a sign-in, so it can't overwrite real data. */
+  if (route[0] === 'import-backup' && method === 'POST') {
+    if (!haUser(req)) return fail(res, 403, 'Open Family Planner from the Home Assistant sidebar to do this.');
+    if (Object.keys(db.logins).length) return fail(res, 409, 'Family Planner already has data, so a backup can only be loaded from the share folder.');
+    const raw = await new Promise((resolve, reject) => {
+      let size = 0; const chunks = [];
+      req.on('data', c => { size += c.length; if (size > 300 * 1024 * 1024) { reject(Object.assign(new Error('too large'), { status: 413 })); req.destroy(); } else chunks.push(c); });
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8'))); req.on('error', reject);
+    });
+    let bk; try { bk = JSON.parse(raw); } catch { return fail(res, 400, "That file can't be read as a backup."); }
+    if (bk.app !== 'home-rota-backup' || !bk.db || !bk.db.logins) return fail(res, 400, "That file isn't a Family Planner backup.");
+    db = { ...empty(), ...bk.db, sessions: {} };
+    let photos = 0;
+    for (const [id, data] of Object.entries(bk.photos || {})) if (ID_RE.test(id)) { fs.writeFileSync(photoFile(id), Buffer.from(data, 'base64'), { mode: 0o600 }); photos++; }
+    saveNow();
+    console.log(`Imported a backup from ${new Date(bk.at).toLocaleString('en-GB', { timeZone: HOUSE_TZ })} (${Object.keys(db.logins).length} sign-ins, ${photos} photos)`);
+    return send(res, 200, { ok: true, logins: Object.keys(db.logins).length, members: Object.keys(db.members || {}).length, photos });
+  }
 
   if (route[0] === 'login' && method === 'POST') {
     const body = await readJson(req);
