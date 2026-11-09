@@ -864,23 +864,39 @@ function currentAnnouncement(profile = null) {
   }
   return null;
 }
-// Small "someone's at the front door" style badge in the corner of every TV. Never pauses or speaks.
-// HA event tivisync_badge { camera: 'Front door', icon?: '🚶', seconds?: 5 }. Same camera at most every 20 s.
+// Small badge in the top-right corner of the TVs (a person on a camera, a job ticked off in Family Planner…).
+// Never pauses or speaks. HA event tivisync_badge { camera: 'Front door', sub?: 'Person seen', icon?: '🚶', seconds?: 5 }.
+// `profiles` (ids) limits it to TVs where one of those profiles is signed in. Same text at most every 20 s.
 const badges = [];
 function addBadge(d = {}) {
   const camera = String(d.camera || d.title || 'Camera').trim().slice(0, 40);
+  const sub = String(d.sub || 'Person seen').trim().slice(0, 80);
   const at = now();
-  if (badges.some((b) => b.camera.toLowerCase() === camera.toLowerCase() && at - b.at < 20_000)) return null;
-  const b = { id: `b${at}-${Math.random().toString(36).slice(2, 6)}`, at, camera,
+  if (badges.some((b) => b.camera.toLowerCase() === camera.toLowerCase() && b.sub === sub && at - b.at < 20_000)) return null;
+  const profiles = Array.isArray(d.profiles) && d.profiles.length ? d.profiles.map(Number).filter(Boolean) : null;
+  const b = { id: `b${at}-${Math.random().toString(36).slice(2, 6)}`, at, camera, sub, profiles,
     icon: String(d.icon || '🚶').slice(0, 8), seconds: Math.min(30, Math.max(2, Number(d.seconds) || 5)) };
   badges.push(b);
-  while (badges.length > 10) badges.shift();
-  console.log(`Badge: ${b.icon} ${b.camera}`);
+  while (badges.length > 20) badges.shift();
+  console.log(`Badge: ${b.icon} ${b.camera} – ${b.sub}${profiles ? ` (profiles ${profiles.join(',')})` : ''}`);
   return b;
 }
-function currentBadge() {
-  const b = badges[badges.length - 1];
-  return b && now() - b.at < 12_000 ? { id: b.id, camera: b.camera, icon: b.icon, seconds: b.seconds } : null;
+function currentBadge(profile = null) {
+  for (let i = badges.length - 1; i >= 0; i--) {
+    const b = badges[i];
+    if (now() - b.at >= 12_000) break;
+    if (b.profiles && !(profile && b.profiles.includes(profile.id))) continue;
+    return { id: b.id, camera: b.camera, sub: b.sub, icon: b.icon, seconds: b.seconds };
+  }
+  return null;
+}
+// "✅ Lisa – Done: Empty the dishwasher" on the TVs of the profiles chosen in the panel (Family Planner sends
+// tivisync_job_done { who, title } whenever a chore is ticked off).
+const jobAlertProfiles = () => { try { return JSON.parse(getSetting('job_alert_profiles') || '[]'); } catch { return []; } };
+function jobDone(d = {}) {
+  const profiles = jobAlertProfiles();
+  if (!profiles.length || !d.title) return null;
+  return addBadge({ camera: String(d.who || 'Someone'), sub: `Done: ${String(d.title).slice(0, 70)}`, icon: '✅', seconds: 6, profiles });
 }
 
 // Today's reminders for a profile (sent by Family Planner as tivisync_announce with daily: true). They pop up once,
@@ -965,7 +981,7 @@ function startHaListener() {
       else if (m.type === 'auth_invalid') { haLive.error = 'Home Assistant refused the add-on token'; ws.close(); }
       else if (m.type === 'auth_ok') {
         haLive.connected = true; haLive.error = null; haLive.since = now();
-        for (const t of ['tivisync_announce', 'tivisync_badge', 'tivisync_approval', 'tivisync_approval_cancel', 'tivisync_bonus', 'mobile_app_notification_action'])
+        for (const t of ['tivisync_announce', 'tivisync_badge', 'tivisync_job_done', 'tivisync_approval', 'tivisync_approval_cancel', 'tivisync_bonus', 'mobile_app_notification_action'])
           ws.send(JSON.stringify({ id: ++id, type: 'subscribe_events', event_type: t }));
         camSubs.clear(); doorbellSub = null;
         if (doorbell) { doorbellSub = ++id; ws.send(JSON.stringify({ id: doorbellSub, type: 'subscribe_trigger', trigger: { platform: 'state', entity_id: doorbell, to: 'on' } })); }
@@ -988,6 +1004,8 @@ function startHaListener() {
           if (m) { try { answerApproval(m[1], m[2], 'a phone'); } catch (err) { console.warn(err.message); } }
         } else if (e.event_type === 'tivisync_badge') {
           addBadge(d0);
+        } else if (e.event_type === 'tivisync_job_done') {
+          jobDone(d0);
         } else if (e.event_type === 'tivisync_announce') {
           const d = e.data || {};
           if (d.daily) { setDailyNote(d.profile, d); return; }
@@ -1032,6 +1050,14 @@ route('PUT', '/api/admin/camera-alerts', 'admin', async (req, b) => {
   subscribeCameras();
   return { ok: true, alerts };
 });
+route('GET', '/api/admin/job-alerts', 'admin', async () => ({ profiles: jobAlertProfiles() }));
+route('PUT', '/api/admin/job-alerts', 'admin', async (req, b) => {
+  const ids = new Set(db.prepare('SELECT id FROM profiles').all().map((r) => r.id));
+  const profiles = (Array.isArray(b.profiles) ? b.profiles : []).map(Number).filter((x) => ids.has(x));
+  setSetting('job_alert_profiles', JSON.stringify(profiles));
+  return { ok: true, profiles };
+});
+route('POST', '/api/admin/job-done', 'admin', async (req, b) => ({ ok: true, badge: jobDone(b) }));
 route('POST', '/api/admin/badge', 'admin', async (req, b) => ({ ok: true, badge: addBadge(b) }));
 route('GET', '/api/admin/announce', 'admin', async () => ({ ...haLive, latest: currentAnnouncement() }));
 route('POST', '/api/admin/announce', 'admin', async (req, b) => {
@@ -1084,7 +1110,62 @@ route('POST', '/api/tv/profiles/:id/login', 'device', async (req, b, { id }, ctx
   clearAttempts(key);
   const t = token();
   db.prepare('INSERT INTO profile_sessions (token, profile_id, device_id, created_at) VALUES (?,?,?,?)').run(t, p.id, ctx.device.id, now());
+  choresOnSignIn(p).catch(() => {});
   return { profileToken: t, profile: profileRow(p), allowance: allowance(p.id) };
+});
+
+// When someone signs in on a TV, ask Family Planner (another add-on) for their chores as they stand right now and
+// show them straight away. Nothing is shown when everything is done or the person isn't linked in Family Planner.
+const FP_URL = () => (process.env.FAMILY_PLANNER_URL || 'http://e53481c0-family-planner:3100').replace(/\/+$/, '');
+async function familyPlannerStatus(p) {
+  for (const key of [String(p.id), p.name]) {
+    const r = await fetch(`${FP_URL()}/api/internal/tv-status?profile=${encodeURIComponent(key)}`, { signal: AbortSignal.timeout(4000) });
+    if (!r.ok) throw new Error(`Family Planner answered ${r.status}`);
+    const d = await r.json();
+    if (d.linked) return d;
+  }
+  return null;
+}
+async function choresOnSignIn(p) {
+  const d = await familyPlannerStatus(p);
+  const list = (d?.chores || []).map((x) => String(x)).filter(Boolean);
+  if (!list.length) return;
+  const message = list.length === 1 ? `You have a chore to do: ${list[0]}.` : `You have ${list.length} chores to do: ${list.slice(0, 5).join(', ')}${list.length > 5 ? '…' : '.'}`;
+  announce('message', message, { title: `🧹 ${d.name || p.name}, chores to do`, pause: false, speak: false, profile: String(p.id) });
+}
+
+// --- radio: UK (or any) stations from the free Radio Browser directory (radio-browser.info)
+const RADIO_HOSTS = ['de1.api.radio-browser.info', 'nl1.api.radio-browser.info', 'at1.api.radio-browser.info', 'all.api.radio-browser.info'];
+const radioCache = new Map();
+async function radioFetch(pathAndQuery) {
+  let last;
+  for (const h of RADIO_HOSTS) {
+    try {
+      const r = await fetch(`https://${h}/json/${pathAndQuery}`, { headers: { 'User-Agent': 'TiviSync/1.13' }, signal: AbortSignal.timeout(8000) });
+      if (r.ok) return await r.json();
+      last = new Error(`Radio directory answered ${r.status}`);
+    } catch (e) { last = e; }
+  }
+  throw last || new Error('Radio directory unreachable');
+}
+const radioRow = (x) => ({ id: x.stationuuid, name: String(x.name || '').trim(), url: x.url_resolved || x.url, logo: x.favicon || null,
+  tags: String(x.tags || '').split(',').map((t) => t.trim()).filter(Boolean).slice(0, 4), country: x.countrycode || '', codec: x.codec || '', bitrate: x.bitrate || 0 });
+route('GET', '/api/tv/radio', 'device', async (req) => {
+  const u = new URL(req.url, 'http://x').searchParams;
+  const q = String(u.get('q') || '').trim().slice(0, 60);
+  const country = /^[A-Z]{2}$/i.test(u.get('country') || '') ? u.get('country').toUpperCase() : 'GB';
+  const key = `${country}|${q.toLowerCase()}`;
+  const hit = radioCache.get(key);
+  if (hit && now() - hit.at < (q ? 3600_000 : 6 * 3600_000)) return { stations: hit.list };
+  const params = new URLSearchParams({ hidebroken: 'true', order: 'clickcount', reverse: 'true', limit: q ? '80' : '150' });
+  if (q) params.set('name', q); else params.set('countrycode', country);
+  const raw = await radioFetch(`stations/search?${params}`);
+  const seen = new Set();
+  const list = (Array.isArray(raw) ? raw : []).map(radioRow).filter((x) => x.url && x.name && /^https?:/.test(x.url))
+    .filter((x) => { const k = x.name.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+  radioCache.set(key, { at: now(), list });
+  if (radioCache.size > 100) radioCache.delete(radioCache.keys().next().value);
+  return { stations: list };
 });
 
 route('POST', '/api/tv/logout', 'profile', async (req) => {
@@ -1634,7 +1715,7 @@ route('GET', '/api/tv/handoff', 'device', async (req, b, p, ctx) => {
   const signedIn = profileOnDevice(req, ctx.device.id);
   const announcement = dailyFor(signedIn) || currentAnnouncement(signedIn); // daily list first: it's only ever returned once
   const approval = approvalFor(signedIn);
-  const badge = currentBadge();
+  const badge = currentBadge(signedIn);
   const h = handoffs.get(ctx.device.id);
   if (!h) return { handoff: null, partyInvite: partyInviteFor(ctx.device.id), announcement, approval, badge };
   handoffs.delete(ctx.device.id);
