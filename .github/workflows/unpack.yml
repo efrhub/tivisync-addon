@@ -16,10 +16,15 @@ jobs:
           if [ "$(tr -d ' \n\r' < bundle.b64 | wc -c)" -lt 100 ]; then echo "bundle.b64 is empty, nothing to do"; exit 0; fi
           tr -d ' \n\r' < bundle.b64 | base64 -d > /tmp/bundle.tar
           # replace only the add-on folders that are in this bundle (gzip or xz), leave the others alone
-          for d in $(tar -tf /tmp/bundle.tar | cut -d/ -f1 | sort -u); do
-            case "$d" in ""|.github|.git) ;; *) rm -rf "$d" ;; esac
-          done
-          tar -xf /tmp/bundle.tar
+          # a bundle containing ".overlay" only adds/replaces its files (e.g. icons); otherwise whole folders are replaced
+          if tar -tf /tmp/bundle.tar | grep -qx '\.overlay'; then
+            tar -xf /tmp/bundle.tar --exclude=.overlay
+          else
+            for d in $(tar -tf /tmp/bundle.tar | cut -d/ -f1 | sort -u); do
+              case "$d" in ""|.github|.git) ;; *) rm -rf "$d" ;; esac
+            done
+            tar -xf /tmp/bundle.tar
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
           git add -A
