@@ -939,7 +939,8 @@ async function tvDaily() {
 function creditTv(l, sign, reason) {
   const login = db.logins[l.by], m = Math.round(+l.minutes || 0), day = houseClock().date;
   if (!login || !login.tivisync || !m) return;
-  if (sign > 0 ? l.tvDay : l.tvDay !== day) return; // once, and only take back time given today
+  /* Given once. Undo only takes back time given today; a job sent back always loses its time until it is redone. */
+  if (sign > 0 ? l.tvDay : reason === 'sent back' ? !l.tvDay : l.tvDay !== day) return;
   if (sign > 0) l.tvDay = day; else delete l.tvDay;
   haEvent('tivisync_bonus', { profile: login.tivisync, minutes: sign * m, reason: `${reason}: ${l.title}` })
     .then(() => console.log(`TV time ${sign > 0 ? '+' : '-'}${m} min for ${db.members[l.by]?.name}: ${l.title}`))
@@ -1340,7 +1341,7 @@ async function api(req, res, url) {
       delete db.reviews[rid];
       if (r.photo) removePhoto(r.photo);
       if (r.original) removePhoto(r.original);
-      if (l) { l.accepted = { by: user.name, at: Date.now() }; broadcast({ coll: 'log', id: r.logId, doc: l }); }
+      if (l) { l.accepted = { by: user.name, at: Date.now() }; creditTv(l, 1, 'redone and checked'); broadcast({ coll: 'log', id: r.logId, doc: l }); }
       note('review', r.memberId, { title: r.title, by: user.name, result: 'ok' });
       save(); broadcast({ coll: 'reviews', id: rid, doc: null });
       notify(r.memberId, 'chores', { title: 'Chore accepted', body: `${r.title} is good. Thank you.`, url: '/#today', tag: `review-${rid}` });
@@ -1558,7 +1559,8 @@ async function api(req, res, url) {
       if (newTick && doc.extra && !user.admin) doc.pending = true; else if (coll === 'log') delete doc.pending;
       if (coll === 'log' && db.log[id]) { if (db.log[id].tvDay) doc.tvDay = db.log[id].tvDay; else delete doc.tvDay; }
       db[coll][id] = doc;
-      if (newTick) { if (doc.pending) askToCheck(id, doc); else creditTv(doc, 1, doc.extra ? 'extra job' : 'chore'); }
+      /* A sent-back job redone with a picture earns its time back only when an adult accepts the picture. */
+      if (newTick) { if (doc.pending) askToCheck(id, doc); else if (!doc.proof) creditTv(doc, 1, doc.extra ? 'extra job' : 'chore'); }
       /* Admins hear when a chore is done, unless they ticked it themselves. */
       if (newTick) haEvent('tivisync_job_done', { who: db.members[doc.by]?.name || user.name, title: doc.title }).catch(() => {}); // small ✅ box on the chosen TVs
       if (newTick) { const who = db.members[doc.by]?.name || user.name; for (const [aid, al] of Object.entries(db.logins)) if (al.admin && aid !== user.id) notify(aid, 'clock', { title: doc.extra ? 'Extra job done' : 'Chore done', body: doc.extra ? `${who} did an extra job: ${doc.title}.` : `${who} has done ${doc.title}.`, url: '/#today', tag: `done-${id}` }); }
