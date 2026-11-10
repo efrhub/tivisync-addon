@@ -384,3 +384,11 @@ a.btn { display: inline-block; text-decoration: none; color: var(--ink); }
   .tab-icon { width: 20px; height: 20px; }
   .tab-badge { position: absolute; top: 2px; right: 2px; margin: 0; }
 }
+
+/* Quick group setup on Progress */
+.group-list b { font-weight: 600; }
+.group-grid-wrap { overflow-x: auto; margin: 8px 0 6px; }
+.group-grid { border-collapse: collapse; font-size: 15px; }
+.group-grid th, .group-grid td { padding: 6px 8px; text-align: center; border-bottom: 1px solid var(--line, rgba(127,127,127,.25)); }
+.group-grid th[scope=row], .group-grid thead th:first-child { text-align: left; font-weight: 500; white-space: nowrap; padding-right: 14px; }
+.group-grid input { width: 20px; height: 20px; margin: 0; }
