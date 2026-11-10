@@ -1691,6 +1691,16 @@ async function api(req, res, url) {
       save(); broadcast({ coll: 'logins' });
       return send(res, 200, { ok: true });
     }
+    /* Quick group setup from the Progress tab: changes only the groups, nothing else about the sign-in. */
+    if (route[2] === 'groups' && method === 'PUT') {
+      const l = db.logins[id];
+      if (!l || !l.cleaner) return fail(res, 400, 'Only people with a cleaner sign-in can be in a group.');
+      const groups = cleanGroups(await readJson(req));
+      l.groups = groups; l.level = groups[0] || 1;
+      refillLevels();
+      save(); broadcast({ coll: 'logins' });
+      return send(res, 200, { ok: true, groups });
+    }
     if (route[2] === 'login' && method === 'DELETE') {
       if (id === user.id) return fail(res, 400, "You can't remove your own sign-in.");
       if (db.logins[id]?.admin && adminCount() <= 1) return fail(res, 400, 'The household needs at least one admin.');
