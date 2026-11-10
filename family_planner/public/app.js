@@ -661,10 +661,27 @@ function viewProgress() {
   </div><div>
     <h2 class="sec">Household</h2>
     ${householdHTML()}
+    ${me.admin ? groupsQuickHTML() : ''}
     <h2 class="sec" style="margin-top:28px">Recently done</h2>
     ${all.length ? `<ul class="mini">${all.slice(0, 12).map(l => `<li><span>${esc(l.title)}${memberName(l.by) ? ' · ' + esc(memberName(l.by)) : ''}</span><span>${esc(fmt(l.date, { day: 'numeric', month: 'short' }))}</span></li>`).join('')}</ul>` : '<p class="empty">Nothing ticked off yet.</p>'}
     ${accountHTML()}
   </div></div>`;
+}
+/* Quick group setup: everyone with a cleaner sign-in against the groups, one tick box each. Saves as soon as a box changes. */
+let groupsShowAll = false;
+function groupsQuickHTML() {
+  const people = members().filter(m => logins[m.id] && logins[m.id].cleaner);
+  if (!people.length) return `<h2 class="sec" style="margin-top:28px">Groups</h2><p class="empty">Give someone a cleaner sign-in to put them in a group.</p>`;
+  const used = Math.max(0, ...people.flatMap(m => logins[m.id].groups || []));
+  const cols = groupsShowAll ? GROUPS : GROUPS.slice(0, Math.min(GROUPS.length, Math.max(3, used + 1)));
+  const list = GROUPS.filter(n => people.some(m => (logins[m.id].groups || []).includes(n)));
+  return `<h2 class="sec" style="margin-top:28px">Groups</h2>
+    <ul class="mini group-list">${list.length ? list.map(n => `<li><span><b>Group ${n}</b></span><span>${esc(people.filter(m => (logins[m.id].groups || []).includes(n)).map(m => m.name).join(', '))}</span></li>`).join('') : '<li><span>Nobody is in a group yet.</span></li>'}</ul>
+    <p class="hint">Quick setup: tick the groups each person is in. It saves straight away.</p>
+    <div class="group-grid-wrap"><table class="group-grid"><thead><tr><th scope="col">Person</th>${cols.map(n => `<th scope="col">${n}</th>`).join('')}</tr></thead><tbody>
+    ${people.map(m => { const g = logins[m.id].groups || []; return `<tr><th scope="row">${esc(m.name)}</th>${cols.map(n => `<td><input type="checkbox" data-quickgroup="${n}" data-id="${esc(m.id)}" ${g.includes(n) ? 'checked' : ''} aria-label="${esc(m.name)} in group ${n}"></td>`).join('')}</tr>`; }).join('')}
+    </tbody></table></div>
+    ${cols.length < GROUPS.length ? '<button class="link" data-a="groups-all">Show all 10 groups</button>' : ''}`;
 }
 const groupLabel = g => !g.length ? 'no group' : g.length === 1 ? `group ${g[0]}` : `groups ${g.slice(0, -1).join(', ')} and ${g[g.length - 1]}`;
 const roleNames = l => [l.cleaner && `Cleaner, ${groupLabel(l.groups || [])}`, l.admin && 'Admin', l.system && 'System user'].filter(Boolean).join(' · ');
@@ -1233,6 +1250,7 @@ document.addEventListener('click', e => {
   else if (a === 'member-del-ask') { b.outerHTML = `<button class="btn danger" data-a="member-del" data-id="${esc(id)}">Yes, remove</button>`; }
   else if (a === 'member-del') { if (who === id) { who = 'all'; pref('who', 'all'); } call('DELETE', `members/${id}`).catch(writeFailed); }
   else if (a === 'login-open') openLogin(id);
+  else if (a === 'groups-all') { groupsShowAll = true; scheduleRender(); }
   else if (a === 'login-del') { closeSheet(); call('DELETE', `members/${id}/login`).then(() => toast('Sign-in removed.')).catch(writeFailed); }
   else if (a === 'pw-open') openPassword();
   else if (a === 'sign-out') { (pushSub ? call('POST', 'push/unsubscribe', { endpoint: pushSub.endpoint }).catch(() => {}) : Promise.resolve()).then(() => call('POST', 'logout')).catch(() => {}).finally(() => { pushInfo = null; showSignedOut(); }); }
@@ -1486,6 +1504,13 @@ document.addEventListener('change', e => {
     const prefs = { chat: on('push-chat'), chores: on('push-chores'), clock: on('push-clock') };
     if (pushInfo) pushInfo.prefs = prefs;
     e.target.blur(); call('POST', 'push/prefs', prefs).catch(writeFailed); return;
+  }
+  if (e.target.dataset && e.target.dataset.quickgroup) {
+    const id = e.target.dataset.id, groups = [...document.querySelectorAll(`[data-quickgroup][data-id="${CSS.escape(id)}"]:checked`)].map(b => +b.dataset.quickgroup);
+    const hidden = (logins[id] && logins[id].groups || []).filter(n => !document.querySelector(`[data-quickgroup="${n}"][data-id="${CSS.escape(id)}"]`));
+    e.target.blur();
+    call('PUT', `members/${id}/groups`, { groups: [...new Set([...groups, ...hidden])] }).then(r => { if (logins[id]) logins[id].groups = r.groups; toast(`${memberName(id)}: ${groupLabel(r.groups)}`); scheduleRender(); }).catch(writeFailed);
+    return;
   }
   if (e.target.dataset && e.target.dataset.nightgroup) { e.target.blur(); call('POST', 'night-groups', { groups: [...document.querySelectorAll('[data-nightgroup]:checked')].map(b => +b.dataset.nightgroup) }).catch(writeFailed); return; }
   if (e.target.id === 'of-hand') { document.getElementById('of-hand-hint').hidden = !e.target.checked; document.getElementById('of-weekly-wrap').hidden = e.target.checked; if (e.target.checked) { document.getElementById('of-weekly').checked = false; document.getElementById('of-to-wrap').hidden = false; } return; }
