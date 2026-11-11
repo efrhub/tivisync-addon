@@ -942,9 +942,20 @@ function creditTv(l, sign, reason) {
   /* Given once. Undo only takes back time given today; a job sent back always loses its time until it is redone. */
   if (sign > 0 ? l.tvDay : reason === 'sent back' ? !l.tvDay : l.tvDay !== day) return;
   if (sign > 0) l.tvDay = day; else delete l.tvDay;
-  haEvent('tivisync_bonus', { profile: login.tivisync, minutes: sign * m, reason: `${reason}: ${l.title}` })
-    .then(() => console.log(`TV time ${sign > 0 ? '+' : '-'}${m} min for ${db.members[l.by]?.name}: ${l.title}`))
-    .catch(e => console.error(`Couldn't update TV time: ${e.message}`));
+  const who = db.members[l.by]?.name || '', data = { profile: login.tivisync, name: who, minutes: sign * m, reason: `${reason}: ${l.title}` };
+  sendTvTime(data)
+    .then(how => console.log(`TV time ${sign > 0 ? '+' : '-'}${m} min for ${who}: ${l.title} (${how})`))
+    .catch(e => console.error(`Couldn't update TV time for ${who}: ${e.message}`));
+}
+/* Straight to TiviSync on Home Assistant's add-on network; the Home Assistant event is only the fallback. */
+async function sendTvTime(data) {
+  try {
+    const r = await fetch(`${TIVISYNC_URL}/api/internal/bonus`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), signal: AbortSignal.timeout(5000) });
+    if (r.ok) { const j = await r.json().catch(() => ({})); return `TiviSync profile ${j.profile || '?'}`; }
+    if (r.status === 404 && (await r.text()).includes('No TiviSync profile')) throw new Error(`no TiviSync profile for ${data.name || data.profile}`);
+  } catch (e) { if (/no TiviSync profile/.test(e.message)) throw e; }
+  if (!await haEvent('tivisync_bonus', data)) throw new Error('TiviSync and Home Assistant could not be reached');
+  return 'via Home Assistant event';
 }
 function askToCheck(id, l) {
   const who = db.members[l.by]?.name || 'Someone';
@@ -1214,6 +1225,20 @@ async function api(req, res, url) {
     const r = remindersFor({ id, ...activeRoles(l) });
     const chores = r.ids.filter(cid => db.chores[cid]).map(cid => db.chores[cid].title);
     return send(res, 200, { linked: true, name: db.members[id].name, chores });
+  }
+  /* TiviSync's "Who's watching?" screen: household reminders (not ones for particular people), nights in and takeaway or eating out, for today and tomorrow. */
+  if (route[0] === 'internal' && route[1] === 'tv-reminders' && method === 'GET') {
+    if (!/^(::ffff:)?172\.3[0-3]\./.test(req.socket.remoteAddress || '')) return fail(res, 403, 'Request refused.');
+    const today = houseClock().date, tomorrow = addInterval(today, 1, 'day');
+    const on = day => {
+      const items = Object.values(db.events).filter(e => !(e.people || []).length && occursOn(e.date, e.unit, e.every, day)).map(e => ({ title: e.title, time: e.time || '' }));
+      for (const n of Object.values(db.nights)) if (n.date === day) items.push({ title: `${n.icon || ''} ${n.name}`.trim(), time: n.time || '' });
+      const din = db.dinners[day];
+      if (din && din.kind === 'takeaway') items.push({ title: din.meal ? `Takeaway night: ${din.meal}` : 'Takeaway night', time: '' });
+      if (din && din.kind === 'out') items.push({ title: din.meal ? `Eating out: ${din.meal}` : 'Eating out', time: '' });
+      return items.sort((a, b) => (a.time || '99').localeCompare(b.time || '99'));
+    };
+    return send(res, 200, { today: on(today), tomorrow: on(tomorrow) });
   }
   /* Browsers can't send this header across sites without permission, which blocks forged requests. */
   if (method !== 'GET' && req.headers['x-rota'] !== '1') return fail(res, 403, 'Request refused.');
