@@ -817,15 +817,22 @@ function profileByRef(ref) {
   return db.prepare('SELECT * FROM profiles WHERE id = ?').get(/^\d+$/.test(r) ? Number(r) : -1) || db.prepare('SELECT * FROM profiles WHERE lower(name) = lower(?)').get(r);
 }
 // TV time earned in Family Planner (event tivisync_bonus). Taking time back never goes below today's normal allowance.
-function earnBonus(ref, minutes, reason) {
-  const p = profileByRef(ref), m = Math.round(Number(minutes) || 0);
-  if (!p || !m || Math.abs(m) > 600) return;
+// Family Planner sends the linked profile id and the person's name: if the id no longer points at that person
+// (profiles re-made, add-on reinstalled), the name wins.
+function earnBonus(ref, minutes, reason, name) {
+  const m = Math.round(Number(minutes) || 0);
+  if (!m || Math.abs(m) > 600) return null;
+  let p = profileByRef(ref);
+  const byName = name ? profileByRef(String(name)) : null;
+  if (byName && (!p || String(p.name).trim().toLowerCase() !== String(name).trim().toLowerCase())) p = byName;
+  if (!p) { console.warn(`TV time ${m > 0 ? '+' : ''}${m} min not added: no TiviSync profile matches "${ref}"${name ? ` / "${name}"` : ''}`); return null; }
   if (m < 0) {
     const u = db.prepare('SELECT bonus_seconds FROM usage_daily WHERE profile_id = ? AND day = ?').get(p.id, today());
     const take = Math.min(-m * 60, u ? u.bonus_seconds : 0);
     if (take > 0) addBonus(p.id, -take / 60);
   } else addBonus(p.id, m);
   console.log(`TV time for ${p.name}: ${m > 0 ? '+' : ''}${m} min${reason ? ` (${reason})` : ''}`);
+  return p;
 }
 
 // --- announcements: doorbell presses and messages from Home Assistant pause the TVs and are shown / read out ---
@@ -998,7 +1005,7 @@ function startHaListener() {
         } else if (e.event_type === 'tivisync_approval_cancel') {
           if (d0.id) closeApproval(String(d0.id), 'cancelled', null, d0.by || null);
         } else if (e.event_type === 'tivisync_bonus') {
-          earnBonus(d0.profile, d0.minutes, d0.reason);
+          earnBonus(d0.profile, d0.minutes, d0.reason, d0.name);
         } else if (e.event_type === 'mobile_app_notification_action') {
           const m = /^TVS\|([^|]+)\|(.+)$/.exec(String(d0.action || ''));
           if (m) { try { answerApproval(m[1], m[2], 'a phone'); } catch (err) { console.warn(err.message); } }
@@ -1030,6 +1037,14 @@ route('GET', '/api/internal/profiles', 'none', async (req) => {
   const ra = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
   if (!/^172\.30\.3[23]\.\d+$/.test(ra) || ra === '172.30.32.1') throw new HttpError(403, 'Only available to Home Assistant add-ons');
   return db.prepare('SELECT id, name FROM profiles ORDER BY name').all();
+});
+// Family Planner adds (or takes back) TV time directly, without going through Home Assistant events.
+route('POST', '/api/internal/bonus', 'none', async (req, b) => {
+  const ra = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  if (!/^172\.30\.3[23]\.\d+$/.test(ra) || ra === '172.30.32.1') throw new HttpError(403, 'Only available to Home Assistant add-ons');
+  const p = earnBonus(b.profile, b.minutes, b.reason, b.name);
+  if (!p) throw new HttpError(404, 'No TiviSync profile matches');
+  return { ok: true, profile: p.name };
 });
 route('GET', '/api/admin/camera-alerts', 'admin', async () => {
   let sensors = [];
@@ -1133,6 +1148,22 @@ async function choresOnSignIn(p) {
   const message = list.length === 1 ? `You have a chore to do: ${list[0]}.` : `You have ${list.length} chores to do: ${list.slice(0, 5).join(', ')}${list.length > 5 ? '…' : '.'}`;
   announce('message', message, { title: `🧹 ${d.name || p.name}, chores to do`, pause: false, speak: false, profile: String(p.id) });
 }
+
+// "Who's watching?" screen: today's and tomorrow's household reminders from Family Planner (kept for a minute)
+let fpReminders = { at: 0, data: null };
+route('GET', '/api/tv/home-reminders', 'device', async () => {
+  if (fpReminders.data && now() - fpReminders.at < 60_000) return fpReminders.data;
+  try {
+    const r = await fetch(`${FP_URL()}/api/internal/tv-reminders`, { signal: AbortSignal.timeout(4000) });
+    if (!r.ok) throw new Error(`Family Planner answered ${r.status}`);
+    const d = await r.json();
+    const clean = (list) => (Array.isArray(list) ? list : []).slice(0, 12).map((x) => ({ title: String(x.title || '').slice(0, 120), time: String(x.time || '').slice(0, 5) })).filter((x) => x.title);
+    fpReminders = { at: now(), data: { today: clean(d.today), tomorrow: clean(d.tomorrow) } };
+  } catch (e) {
+    if (!fpReminders.data) return { today: [], tomorrow: [], unavailable: true };
+  }
+  return fpReminders.data;
+});
 
 // --- radio: UK (or any) stations from the free Radio Browser directory (radio-browser.info)
 const RADIO_HOSTS = ['de1.api.radio-browser.info', 'nl1.api.radio-browser.info', 'at1.api.radio-browser.info', 'all.api.radio-browser.info'];
@@ -1738,7 +1769,7 @@ route('GET', '/api/admin/approvals', 'admin', async () =>
 route('POST', '/api/admin/approvals/:id', 'admin', async (req, b, { id }) => answerApproval(decodeURIComponent(id), String(b.value ?? ''), 'the parent panel'));
 // Lets the tests and the panel open one by hand (same as the Home Assistant event).
 route('POST', '/api/admin/approvals', 'admin', async (req, b) => {
-  if (b.bonus) { earnBonus(b.profile, b.minutes, b.reason); return { ok: true }; }
+  if (b.bonus) { earnBonus(b.profile, b.minutes, b.reason, b.name); return { ok: true }; }
   openApproval({ id: String(b.id), kind: 'external', title: b.title, message: b.message, options: b.options });
   return { ok: true };
 });
