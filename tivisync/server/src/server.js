@@ -391,6 +391,17 @@ route('POST', '/api/admin/requests/:id', 'admin', async (req, b, { id }) => {
 });
 
 // --- usage ---
+// Watch history: what each profile watched (films, episodes, channels) with how far they got
+route('GET', '/api/admin/history', 'admin', async (req) => {
+  const u = new URL(req.url, 'http://x').searchParams;
+  const days = Math.max(1, Math.min(60, Number(u.get('days') || 7)));
+  const pid = Number(u.get('profile')) || null;
+  return db.prepare(`SELECT pr.profile_id AS profileId, p.name AS profile, d.name AS device, pr.type, pr.title, pr.series_title AS seriesTitle,
+      pr.season, pr.episode, pr.position_ms AS positionMs, pr.duration_ms AS durationMs, pr.watched, pr.updated_at AS at
+    FROM progress pr JOIN profiles p ON p.id = pr.profile_id LEFT JOIN devices d ON d.id = pr.device_id
+    WHERE pr.updated_at >= ? ${pid ? 'AND pr.profile_id = ?' : ''} ORDER BY pr.updated_at DESC LIMIT 400`)
+    .all(...[now() - days * 86400_000, ...(pid ? [pid] : [])]);
+});
 route('GET', '/api/admin/usage', 'admin', async (req) => {
   const u = new URL(req.url, 'http://x');
   const days = Math.max(1, Math.min(90, Number(u.searchParams.get('days') || 7)));
@@ -825,7 +836,8 @@ function earnBonus(ref, minutes, reason, name) {
   let p = profileByRef(ref);
   const byName = name ? profileByRef(String(name)) : null;
   if (byName && (!p || String(p.name).trim().toLowerCase() !== String(name).trim().toLowerCase())) p = byName;
-  if (!p) { console.warn(`TV time ${m > 0 ? '+' : ''}${m} min not added: no TiviSync profile matches "${ref}"${name ? ` / "${name}"` : ''}`); return null; }
+  if (!p) { weekStat('choreMissed', 1); console.warn(`TV time ${m > 0 ? '+' : ''}${m} min not added: no TiviSync profile matches "${ref}"${name ? ` / "${name}"` : ''}`); return null; }
+  weekStat('choreOk', 1); if (m > 0) weekStat('choreMin', m);
   if (m < 0) {
     const u = db.prepare('SELECT bonus_seconds FROM usage_daily WHERE profile_id = ? AND day = ?').get(p.id, today());
     const take = Math.min(-m * 60, u ? u.bonus_seconds : 0);
@@ -848,7 +860,8 @@ function announce(kind, message, opts = {}) {
   const a = { id: `${at}-${Math.random().toString(36).slice(2, 7)}`, kind, at,
     title: String(opts.title || (kind === 'doorbell' ? "🔔 Someone's at the door" : '📢 Announcement')).slice(0, 80),
     message: String(message || '').slice(0, 300), pause: opts.pause !== false, speak: opts.speak !== false,
-    profile: opts.profile != null && String(opts.profile).trim() ? String(opts.profile).trim().slice(0, 60) : null };
+    profile: opts.profile != null && String(opts.profile).trim() ? String(opts.profile).trim().slice(0, 60) : null,
+    camera: /^camera\.[a-z0-9_]+$/.test(String(opts.camera || '')) ? String(opts.camera) : null };
   announcements.push(a);
   while (announcements.length > 40 || (announcements[0] && at - announcements[0].at > 32 * 60_000)) announcements.shift();
   console.log(`Announcement (${kind}): ${a.title}${a.message ? ' – ' + a.message : ''}`);
@@ -882,7 +895,9 @@ function addBadge(d = {}) {
   if (badges.some((b) => b.camera.toLowerCase() === camera.toLowerCase() && b.sub === sub && at - b.at < 20_000)) return null;
   const profiles = Array.isArray(d.profiles) && d.profiles.length ? d.profiles.map(Number).filter(Boolean) : null;
   const b = { id: `b${at}-${Math.random().toString(36).slice(2, 6)}`, at, camera, sub, profiles,
-    icon: String(d.icon || '🚶').slice(0, 8), seconds: Math.min(30, Math.max(2, Number(d.seconds) || 5)) };
+    icon: String(d.icon || '🚶').slice(0, 8), seconds: Math.min(30, Math.max(2, Number(d.seconds) || 5)),
+    cameraEntity: /^camera\.[a-z0-9_]+$/.test(String(d.cameraEntity || '')) ? String(d.cameraEntity) : null,
+    pictureProfiles: Array.isArray(d.pictureProfiles) ? d.pictureProfiles.map(Number).filter(Boolean) : [] };
   badges.push(b);
   while (badges.length > 20) badges.shift();
   console.log(`Badge: ${b.icon} ${b.camera} – ${b.sub}${profiles ? ` (profiles ${profiles.join(',')})` : ''}`);
@@ -893,7 +908,9 @@ function currentBadge(profile = null) {
     const b = badges[i];
     if (now() - b.at >= 12_000) break;
     if (b.profiles && !(profile && b.profiles.includes(profile.id))) continue;
-    return { id: b.id, camera: b.camera, sub: b.sub, icon: b.icon, seconds: b.seconds };
+    // the live picture only for the chosen profiles; a TV with nobody signed in counts as everyone
+    const pic = b.cameraEntity && (!b.pictureProfiles.length || !profile || b.pictureProfiles.includes(profile.id)) ? b.cameraEntity : null;
+    return { id: b.id, camera: b.camera, sub: b.sub, icon: b.icon, seconds: pic ? b.seconds : Math.min(b.seconds, 5), cameraEntity: pic };
   }
   return null;
 }
@@ -941,7 +958,11 @@ function cleanAlert(a, i = 0) {
   if (!/^[a-z_]+\.[a-z0-9_]+$/.test(entity)) return null;
   return { id: String(a.id || `c${Date.now().toString(36)}${i}`).slice(0, 30), name: String(a.name || 'Camera').trim().slice(0, 40) || 'Camera', entity,
     from: t(a.from), to: t(a.to), days: Array.isArray(a.days) ? [...new Set(a.days.map(Number).filter((d) => d >= 0 && d <= 6))].sort() : [],
-    enabled: a.enabled !== false };
+    enabled: a.enabled !== false,
+    // live picture in the TV's corner: 'auto' (the camera with the same name), 'none', or a chosen camera
+    picture: a.picture === 'none' || /^camera\.[a-z0-9_]+$/.test(String(a.picture || '')) ? String(a.picture) : 'auto',
+    // who sees the live picture (profile ids; empty = everyone). Everyone else still gets the small box.
+    pictureProfiles: Array.isArray(a.pictureProfiles) ? [...new Set(a.pictureProfiles.map(Number).filter((n) => n > 0))] : [] };
 }
 function cameraAlerts() {
   const saved = getSetting('camera_alerts');
@@ -959,6 +980,56 @@ function inWindow(a, d = new Date()) {
 }
 const camSubs = new Map();
 let doorbellSub = null;
+// --- camera pictures on the TVs (doorbell picture-in-picture, camera alert badges) ---
+const camCache = { at: 0, ids: [] };
+async function refreshCameraList() {
+  const token = process.env.SUPERVISOR_TOKEN;
+  if (!token || now() - camCache.at < 10 * 60_000) return camCache.ids;
+  try {
+    const r = await fetch('http://supervisor/core/api/states', { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000) });
+    if (r.ok) camCache.ids = (await r.json()).map((s) => s.entity_id).filter((e) => e.startsWith('camera.')).sort();
+    camCache.at = now();
+  } catch { /* keep the old list */ }
+  return camCache.ids;
+}
+// binary_sensor.doorbell_person → camera.doorbell_fluent (same name at the start)
+function alertBadge(c) {
+  const pic = c.picture === 'none' ? null : c.picture && c.picture !== 'auto' ? c.picture : cameraFor(c.entity);
+  return { camera: c.name, cameraEntity: pic, pictureProfiles: c.pictureProfiles || [], seconds: pic ? 10 : 5 };
+}
+function cameraFor(entity) {
+  const base = String(entity || '').replace(/^[a-z_]+\./, '').replace(/_(person|motion|visitor|vehicle|pet|package|animal|occupancy|ring|ding|button|press(ed)?)$/, '');
+  if (!base) return null;
+  const ids = camCache.ids;
+  return ids.find((c) => c === `camera.${base}`) || ids.find((c) => c.startsWith(`camera.${base}_`)) || null;
+}
+function doorbellCamera() {
+  const set = getSetting('doorbell_camera');
+  if (set === 'none') return null;
+  return set || cameraFor(haLive.doorbell);
+}
+if (!process.env.NO_CHARTS) { setTimeout(() => refreshCameraList().catch(() => {}), 4_000); setInterval(() => refreshCameraList().catch(() => {}), 15 * 60_000); }
+// a still picture from a Home Assistant camera, refreshed by the TV about once a second
+route('GET', '/api/tv/camera', 'device', async (req, b, p, ctx, res) => {
+  const entity = String(new URL(req.url, 'http://x').searchParams.get('entity') || '');
+  if (!/^camera\.[a-z0-9_]+$/.test(entity)) throw new HttpError(400, 'Choose a camera');
+  const token = process.env.SUPERVISOR_TOKEN;
+  if (!token) throw new HttpError(503, 'Cameras need Home Assistant');
+  const r = await fetch(`http://supervisor/core/api/camera_proxy/${entity}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000) });
+  if (!r.ok) throw new HttpError(502, `Camera answered ${r.status}`);
+  const buf = Buffer.from(await r.arrayBuffer());
+  res.writeHead(200, { 'Content-Type': r.headers.get('content-type') || 'image/jpeg', 'Content-Length': buf.length, 'Cache-Control': 'no-store' });
+  res.end(buf);
+  return undefined;
+}, { raw: true });
+route('GET', '/api/admin/doorbell-camera', 'admin', async () => ({ setting: getSetting('doorbell_camera') || '', current: doorbellCamera(), cameras: await refreshCameraList() }));
+route('PUT', '/api/admin/doorbell-camera', 'admin', async (req, b) => {
+  const v = String(b.camera || '');
+  if (v && v !== 'none' && !/^camera\.[a-z0-9_]+$/.test(v)) throw new HttpError(400, 'Choose a camera');
+  setSetting('doorbell_camera', v || null);
+  return { setting: v, current: doorbellCamera() };
+});
+
 let haSock = null, haSockNextId = () => 0;
 // (re)subscribe to the camera sensors on the open Home Assistant connection
 function subscribeCameras() {
@@ -1019,9 +1090,9 @@ function startHaListener() {
           announce(d.kind === 'doorbell' ? 'doorbell' : 'message', d.message, { title: d.title, pause: d.pause, speak: d.speak, profile: d.profile });
         } else if (e.variables?.trigger && camSubs.has(m.id)) {
           const c = camSubs.get(m.id);
-          if (inWindow(c)) addBadge({ camera: c.name });
+          if (inWindow(c)) addBadge(alertBadge(c));
         } else if (e.variables?.trigger && (doorbellSub === null || m.id === doorbellSub)) {
-          announce('doorbell', '');
+          announce('doorbell', '', { camera: doorbellCamera() });
         }
       }
     };
@@ -1057,7 +1128,7 @@ route('GET', '/api/admin/camera-alerts', 'admin', async () => {
         .sort((a, b) => a.name.localeCompare(b.name));
     } catch { /* not linked */ }
   }
-  return { alerts: cameraAlerts(), sensors, linked: haLive.connected };
+  return { alerts: cameraAlerts().map((a) => ({ ...a, picture: a.picture || 'auto', autoCamera: cameraFor(a.entity) })), sensors, cameras: await refreshCameraList(), profiles: db.prepare('SELECT id, name FROM profiles ORDER BY name').all(), linked: haLive.connected };
 });
 route('PUT', '/api/admin/camera-alerts', 'admin', async (req, b) => {
   const alerts = (Array.isArray(b.alerts) ? b.alerts : []).slice(0, 30).map(cleanAlert).filter(Boolean);
@@ -1073,13 +1144,16 @@ route('PUT', '/api/admin/job-alerts', 'admin', async (req, b) => {
   return { ok: true, profiles };
 });
 route('POST', '/api/admin/job-done', 'admin', async (req, b) => ({ ok: true, badge: jobDone(b) }));
-route('POST', '/api/admin/badge', 'admin', async (req, b) => ({ ok: true, badge: addBadge(b) }));
+route('POST', '/api/admin/badge', 'admin', async (req, b) => {
+  const a = b.alert && cleanAlert(b.alert);
+  return { ok: true, badge: addBadge(a ? { ...alertBadge(a), camera: a.name } : b) };
+});
 route('GET', '/api/admin/announce', 'admin', async () => ({ ...haLive, latest: currentAnnouncement() }));
 route('POST', '/api/admin/announce', 'admin', async (req, b) => {
   const kind = b.kind === 'doorbell' ? 'doorbell' : 'message';
   if (b.daily) { setDailyNote(b.profile, b); return { ok: true }; }
   if (kind === 'message' && !String(b.message || '').trim()) throw new HttpError(400, 'Type a message to send');
-  return announce(kind, b.message, { title: b.title, pause: b.pause, profile: b.profile });
+  return announce(kind, b.message, { title: b.title, pause: b.pause, profile: b.profile, camera: kind === 'doorbell' ? doorbellCamera() : null });
 });
 
 async function refreshRemoteUrl() {
@@ -1115,6 +1189,13 @@ route('GET', '/api/tv/bootstrap', 'device', async (req, b, p, ctx) => ({
     homeOnly: getSetting('vpn_home_only', '1') === '1',
   },
 }));
+
+// "Who's watching?": how much TV time each profile has left today (null = no daily limit right now)
+route('GET', '/api/tv/profiles-status', 'device', async () =>
+  db.prepare('SELECT id FROM profiles ORDER BY id').all().map(({ id }) => {
+    const a = allowance(id);
+    return { id, allowed: a.allowed, limited: a.limited, timeLeftSec: a.limited && a.remainingSec != null ? a.remainingSec : null, reason: a.reason };
+  }));
 
 route('POST', '/api/tv/profiles/:id/login', 'device', async (req, b, { id }, ctx) => {
   const p = db.prepare('SELECT * FROM profiles WHERE id = ?').get(id);
@@ -1586,8 +1667,10 @@ function dropWatched(profileId, sourceId, type, streamId, seriesId) {
 route('POST', '/api/tv/series-total', 'profile', async (req, b, p, { profile }) => {
   const sourceId = Number(b.sourceId); const seriesId = String(b.seriesId || ''); const total = Math.max(0, Number(b.total) | 0);
   if (!sourceId || !seriesId) throw new HttpError(400, 'sourceId and seriesId required');
+  const old = db.prepare('SELECT total FROM series_totals WHERE source_id = ? AND series_id = ?').get(sourceId, seriesId);
   db.prepare(`INSERT INTO series_totals (source_id, series_id, total, updated_at) VALUES (?,?,?,?)
     ON CONFLICT(source_id, series_id) DO UPDATE SET total = excluded.total, updated_at = excluded.updated_at`).run(sourceId, seriesId, total, now());
+  if (old && old.total > 0 && total > old.total) db.prepare('UPDATE series_totals SET grown_at = ? WHERE source_id = ? AND series_id = ?').run(now(), sourceId, seriesId);
   return { done: seriesDone(profile.id, sourceId, seriesId) };
 });
 route('GET', '/api/tv/series-done', 'profile', async (req, b, p, { profile }) => {
@@ -1595,6 +1678,26 @@ route('GET', '/api/tv/series-done', 'profile', async (req, b, p, { profile }) =>
   const rows = db.prepare(`SELECT t.series_id, t.total, (SELECT COUNT(*) FROM progress pr WHERE pr.profile_id = ? AND pr.source_id = t.source_id
       AND pr.series_id = t.series_id AND pr.type = 'episode' AND pr.watched = 1) n FROM series_totals t WHERE t.source_id = ?`).all(profile.id, sourceId);
   return rows.filter((r) => r.total > 0 && r.n >= r.total).map((r) => r.series_id);
+});
+
+// --- "New episodes": series this profile was following that have gained episodes since they last watched ---
+// The TV refreshes the episode count of the series in `check` (recently watched, not checked for 6 hours) and
+// then asks again; `items` are the series with new episodes.
+route('GET', '/api/tv/new-episodes', 'profile', async (req, b, p, { profile }) => {
+  const sourceId = Number(new URL(req.url, 'http://x').searchParams.get('sourceId'));
+  const since = now() - 60 * 86400_000;
+  const series = db.prepare(`SELECT series_id, MAX(updated_at) last, MAX(series_title) title,
+      SUM(CASE WHEN watched = 1 THEN 1 ELSE 0 END) seen
+    FROM progress WHERE profile_id = ? AND source_id = ? AND type = 'episode' AND series_id IS NOT NULL AND updated_at > ?
+    GROUP BY series_id ORDER BY last DESC LIMIT 15`).all(profile.id, sourceId, since);
+  const check = [], items = [];
+  for (const s of series) {
+    const t = db.prepare('SELECT total, updated_at, grown_at FROM series_totals WHERE source_id = ? AND series_id = ?').get(sourceId, s.series_id);
+    if (!t || now() - t.updated_at > 6 * 3600_000) check.push(s.series_id);
+    if (t && t.grown_at && t.grown_at > s.last && now() - t.grown_at < 30 * 86400_000 && s.seen < t.total)
+      items.push({ seriesId: s.series_id, title: s.title || '', newCount: t.total - s.seen });
+  }
+  return { check, items };
 });
 
 // --- channel manager: per-profile channel ticks + merged qualities ---
@@ -1632,6 +1735,61 @@ function scheduleNightly() {
   if (next <= new Date()) next.setDate(next.getDate() + 1);
   setTimeout(async () => { await refreshAllChannels('nightly').catch((e) => console.warn('nightly channel refresh failed', e.message)); await nightlyRatings(); scheduleNightly(); }, next - Date.now()).unref();
 }
+// ---------- weekly check-up: a phone notification every Sunday at 18:00 ----------
+// TVs that haven't updated or been seen, VPN drops, and whether chore time is reaching TiviSync.
+function weekKey(t = now()) { const d = new Date(today(t) + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); }
+function weekStat(k, n) {
+  try {
+    let s = JSON.parse(getSetting('week_stats') || '{}');
+    if (s.week !== weekKey()) s = { week: weekKey() };
+    s[k] = (s[k] || 0) + n;
+    setSetting('week_stats', JSON.stringify(s));
+  } catch { /* stats are best-effort */ }
+}
+function weeklyReport() {
+  const since = now() - 7 * 86400_000;
+  const latest = appMeta()?.versionCode || null;
+  const devs = db.prepare('SELECT id, name, last_seen, app_build FROM devices ORDER BY name').all();
+  const lines = [], problems = [];
+  for (const d of devs) {
+    const drops = db.prepare(`SELECT COUNT(*) n FROM device_logs WHERE device_id = ? AND ts > ? AND tag = 'vpn' AND (msg LIKE 'tunnel dropped%' OR msg LIKE 'tunnel failed%')`).get(d.id, since).n;
+    const seen = d.last_seen ? Math.floor((now() - d.last_seen) / 86400_000) : null;
+    const old = latest && d.app_build && Number(d.app_build) < latest;
+    const bits = [];
+    if (seen == null || seen >= 3) bits.push(seen == null ? 'never seen' : `not seen for ${seen} days`);
+    if (old) bits.push(`on build ${d.app_build} (latest ${latest})`);
+    if (drops) bits.push(`VPN dropped ${drops}×`);
+    if (bits.length) problems.push(d.name);
+    lines.push(`${bits.length ? '⚠️' : '✅'} ${d.name}${bits.length ? ': ' + bits.join(', ') : (d.app_build ? ` (build ${d.app_build})` : '')}`);
+  }
+  let s = {}; try { s = JSON.parse(getSetting('week_stats') || '{}'); } catch { /* none */ }
+  if (s.week !== weekKey()) s = {};
+  const chores = s.choreOk || s.choreMissed
+    ? `🧹 Chore TV time: ${s.choreOk || 0} updates (${s.choreMin || 0} min earned)${s.choreMissed ? `, ⚠️ ${s.choreMissed} couldn't be matched to a profile` : ''}`
+    : '🧹 Chore TV time: nothing received this week';
+  if (s.choreMissed) problems.push('chore time');
+  const ha = haLive.connected ? '🏠 Home Assistant link: OK' : `⚠️ Home Assistant link: ${haLive.error || 'not connected'}`;
+  if (!haLive.connected) problems.push('Home Assistant link');
+  const title = problems.length ? `📺 TiviSync check-up: ${problems.length} to look at` : '📺 TiviSync check-up: all good';
+  return { title, message: [...lines, chores, ha].join('\n') };
+}
+async function sendWeeklyReport() {
+  const r = weeklyReport();
+  const svcs = notifyServices();
+  for (const svc of svcs) await haCall('notify', svc, { title: r.title, message: r.message, data: { tag: 'tvs-weekly', channel: 'TiviSync' } }).catch((e) => console.warn(`Weekly check-up to ${svc} failed: ${e.message}`));
+  console.log(`${r.title}\n${r.message}`);
+  return { ...r, sentTo: svcs };
+}
+route('GET', '/api/admin/weekly-report', 'admin', async () => weeklyReport());
+route('POST', '/api/admin/weekly-report', 'admin', async () => sendWeeklyReport());
+if (!process.env.NO_CHARTS) setInterval(() => {
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, weekday: 'short', hour: '2-digit', hour12: false }).formatToParts(new Date());
+  const wd = parts.find((x) => x.type === 'weekday')?.value, hr = Number(parts.find((x) => x.type === 'hour')?.value);
+  if (wd !== 'Sun' || hr !== 18 || getSetting('weekly_report_sent') === weekKey()) return;
+  setSetting('weekly_report_sent', weekKey());
+  sendWeeklyReport().catch((e) => console.warn(`Weekly check-up failed: ${e.message}`));
+}, 10 * 60_000).unref();
+
 if (!process.env.NO_CHARTS) { scheduleNightly(); setTimeout(() => refreshAllChannels('startup').catch(() => {}), 30_000).unref(); }
 
 route('GET', '/api/admin/channels', 'admin', async (req) => {
@@ -1790,6 +1948,7 @@ route('POST', '/api/tv/logs', 'device', async (req, b, p, ctx) => {
   const t0 = now();
   db.exec('BEGIN');
   try {
+    if (meta.app && /^build \d+$/.test(String(meta.app))) db.prepare('UPDATE devices SET app_build = ? WHERE id = ?').run(String(meta.app).slice(6), ctx.device.id);
     if (meta && Object.keys(meta).length) ins.run(ctx.device.id, t0, 'I', 'device', Object.entries(meta).map(([k, v]) => `${k}=${String(v).slice(0, 80)}`).join(' ').slice(0, 600));
     for (const e of entries) {
       const ts = Math.min(Number(e.t) || t0, t0 + 60_000);
