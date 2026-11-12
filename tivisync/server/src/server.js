@@ -900,7 +900,7 @@ function addBadge(d = {}) {
     pictureProfiles: Array.isArray(d.pictureProfiles) ? d.pictureProfiles.map(Number).filter(Boolean) : [] };
   badges.push(b);
   while (badges.length > 20) badges.shift();
-  console.log(`Badge: ${b.icon} ${b.camera} – ${b.sub}${profiles ? ` (profiles ${profiles.join(',')})` : ''}`);
+  console.log(`Badge: ${b.icon} ${b.camera} – ${b.sub}${profiles ? ` (profiles ${profiles.join(',')})` : ''}${b.cameraEntity ? ` 📷 ${b.cameraEntity}` : ''}`);
   return b;
 }
 function currentBadge(profile = null) {
@@ -920,7 +920,8 @@ const jobAlertProfiles = () => { try { return JSON.parse(getSetting('job_alert_p
 function jobDone(d = {}) {
   const profiles = jobAlertProfiles();
   if (!profiles.length || !d.title) return null;
-  return addBadge({ camera: String(d.who || 'Someone'), sub: `Done: ${String(d.title).slice(0, 70)}`, icon: '✅', seconds: 6, profiles });
+  // the job is the headline, who did it underneath: "✅ Empty the dishwasher" / "Done by Lisa"
+  return addBadge({ camera: String(d.title).slice(0, 40), sub: `Done by ${String(d.who || 'someone').slice(0, 40)}`, icon: '✅', seconds: 8, profiles });
 }
 
 // Today's reminders for a profile (sent by Family Planner as tivisync_announce with daily: true). They pop up once,
@@ -987,9 +988,13 @@ async function refreshCameraList() {
   if (!token || now() - camCache.at < 10 * 60_000) return camCache.ids;
   try {
     const r = await fetch('http://supervisor/core/api/states', { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000) });
-    if (r.ok) camCache.ids = (await r.json()).map((s) => s.entity_id).filter((e) => e.startsWith('camera.')).sort();
+    if (r.ok) {
+      const ids = (await r.json()).map((s) => s.entity_id).filter((e) => e.startsWith('camera.')).sort();
+      if (ids.join() !== camCache.ids.join()) console.log(`Cameras: ${ids.length} found${haLive.doorbell ? ` · doorbell picture: ${(camCache.ids = ids, doorbellCamera()) || 'none'}` : ''}`);
+      camCache.ids = ids;
+    } else console.warn(`Camera list: Home Assistant answered ${r.status}`);
     camCache.at = now();
-  } catch { /* keep the old list */ }
+  } catch (e) { console.warn(`Camera list failed: ${e.message}`); }
   return camCache.ids;
 }
 // binary_sensor.doorbell_person → camera.doorbell_fluent (same name at the start)
@@ -1016,7 +1021,7 @@ route('GET', '/api/tv/camera', 'device', async (req, b, p, ctx, res) => {
   const token = process.env.SUPERVISOR_TOKEN;
   if (!token) throw new HttpError(503, 'Cameras need Home Assistant');
   const r = await fetch(`http://supervisor/core/api/camera_proxy/${entity}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000) });
-  if (!r.ok) throw new HttpError(502, `Camera answered ${r.status}`);
+  if (!r.ok) { console.warn(`Camera picture ${entity}: Home Assistant answered ${r.status}`); throw new HttpError(502, `Camera answered ${r.status}`); }
   const buf = Buffer.from(await r.arrayBuffer());
   res.writeHead(200, { 'Content-Type': r.headers.get('content-type') || 'image/jpeg', 'Content-Length': buf.length, 'Cache-Control': 'no-store' });
   res.end(buf);
@@ -1232,7 +1237,8 @@ async function choresOnSignIn(p) {
 
 // "Who's watching?" screen: today's and tomorrow's household reminders from Family Planner (kept for a minute)
 let fpReminders = { at: 0, data: null };
-route('GET', '/api/tv/home-reminders', 'device', async () => {
+route('GET', '/api/tv/home-reminders', 'device', async () => homeReminders());
+async function homeReminders() {
   if (fpReminders.data && now() - fpReminders.at < 60_000) return fpReminders.data;
   try {
     const r = await fetch(`${FP_URL()}/api/internal/tv-reminders`, { signal: AbortSignal.timeout(4000) });
@@ -1244,6 +1250,71 @@ route('GET', '/api/tv/home-reminders', 'device', async () => {
     if (!fpReminders.data) return { today: [], tomorrow: [], unavailable: true };
   }
   return fpReminders.data;
+}
+
+// ---------- 🏡 House dashboard on the TVs: weather, who's home, jobs, reminders, open doors, cameras ----------
+async function haStatesAll() {
+  const token = process.env.SUPERVISOR_TOKEN;
+  if (!token) return [];
+  const r = await fetch('http://supervisor/core/api/states', { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000) });
+  if (!r.ok) throw new Error(`Home Assistant answered ${r.status}`);
+  return r.json();
+}
+// WMO weather codes (Open-Meteo) → icon + words
+function weatherText(code, day = true) {
+  const c = Number(code);
+  if (c === 0) return [day ? '☀️' : '🌙', 'Clear'];
+  if (c <= 2) return [day ? '🌤️' : '☁️', 'Partly cloudy'];
+  if (c === 3) return ['☁️', 'Cloudy'];
+  if (c === 45 || c === 48) return ['🌫️', 'Fog'];
+  if (c >= 51 && c <= 57) return ['🌦️', 'Drizzle'];
+  if ((c >= 61 && c <= 67) || (c >= 80 && c <= 82)) return ['🌧️', c >= 65 && c <= 67 || c === 82 ? 'Heavy rain' : 'Rain'];
+  if ((c >= 71 && c <= 77) || c === 85 || c === 86) return ['🌨️', 'Snow'];
+  if (c >= 95) return ['⛈️', 'Thunderstorms'];
+  return ['🌡️', ''];
+}
+const weatherCache = { at: 0, data: null };
+async function weather(states) {
+  if (weatherCache.data && now() - weatherCache.at < 30 * 60_000) return weatherCache.data;
+  const home = states.find((s) => s.entity_id === 'zone.home')?.attributes;
+  const lat = Number(process.env.WEATHER_LAT || home?.latitude), lon = Number(process.env.WEATHER_LON || home?.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const q = new URLSearchParams({ latitude: lat.toFixed(3), longitude: lon.toFixed(3), timezone: TZ, forecast_days: '2',
+    current: 'temperature_2m,weather_code,is_day', hourly: 'precipitation_probability',
+    daily: 'temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code' });
+  try {
+    const r = await fetch(`https://api.open-meteo.com/v1/forecast?${q}`, { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) throw new Error(`weather service answered ${r.status}`);
+    const w = await r.json();
+    const [icon, text] = weatherText(w.current?.weather_code, w.current?.is_day !== 0);
+    // first hour from now (today) with a 50%+ chance of rain
+    const hr = new Date().toLocaleTimeString('en-GB', { timeZone: TZ, hour: '2-digit', hour12: false });
+    const todayStr = today();
+    let rainFrom = null;
+    (w.hourly?.time || []).forEach((t, i) => { if (!rainFrom && t.startsWith(todayStr) && t.slice(11, 13) >= hr && (w.hourly.precipitation_probability[i] || 0) >= 50) rainFrom = t.slice(11, 16); });
+    const day = (i) => w.daily && { max: Math.round(w.daily.temperature_2m_max[i]), min: Math.round(w.daily.temperature_2m_min[i]), rain: w.daily.precipitation_probability_max[i] ?? null, icon: weatherText(w.daily.weather_code[i])[0], text: weatherText(w.daily.weather_code[i])[1] };
+    weatherCache.data = { now: Math.round(w.current?.temperature_2m), icon, text, rainFrom, today: day(0), tomorrow: day(1) };
+    weatherCache.at = now();
+  } catch (e) { console.warn(`Weather: ${e.message}`); if (!weatherCache.data) return null; }
+  return weatherCache.data;
+}
+const dashCache = { at: 0, data: null };
+route('GET', '/api/tv/dashboard', 'device', async () => {
+  if (dashCache.data && now() - dashCache.at < 45_000) return dashCache.data;
+  let states = [];
+  try { states = await haStatesAll(); } catch (e) { console.warn(`Dashboard: ${e.message}`); }
+  const name = (s) => String(s.attributes?.friendly_name || s.entity_id.split('.')[1].replace(/_/g, ' '));
+  const people = states.filter((s) => s.entity_id.startsWith('person.')).map((s) => ({
+    name: name(s).split(' ')[0], home: s.state === 'home',
+    where: s.state === 'home' ? 'Home' : s.state === 'not_home' ? 'Out' : s.state === 'unknown' || s.state === 'unavailable' ? '?' : s.state.replace(/_/g, ' ') }));
+  const open = states.filter((s) => s.entity_id.startsWith('binary_sensor.') && s.state === 'on' && ['door', 'window', 'opening', 'garage_door'].includes(s.attributes?.device_class))
+    .map((s) => name(s).replace(/\s*(opening|contact|sensor)$/i, '')).filter((v, i, a) => a.indexOf(v) === i).slice(0, 12);
+  const cams = states.filter((s) => s.entity_id.startsWith('camera.') && s.state !== 'unavailable').map((s) => ({ entity: s.entity_id, name: name(s).replace(/\s*fluent$/i, '') })).slice(0, 8);
+  const profiles = db.prepare('SELECT * FROM profiles ORDER BY name').all();
+  const jobs = (await Promise.all(profiles.map((p) => familyPlannerStatus(p).then((d) => d && { name: d.name || p.name, chores: (d.chores || []).map(String).slice(0, 8) }).catch(() => null)))).filter(Boolean);
+  const data = { weather: await weather(states), people, jobs, reminders: await homeReminders(), open, cameras: cams };
+  dashCache.data = data; dashCache.at = now();
+  return data;
 });
 
 // --- radio: UK (or any) stations from the free Radio Browser directory (radio-browser.info)
