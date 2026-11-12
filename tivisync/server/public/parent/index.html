@@ -196,7 +196,7 @@ async function loadProfiles() {
   try { state.overview = await api('GET', '/api/admin/overview'); } catch (e) { return toast(e.message); }
   const ps = state.overview.profiles;
   $('#app').innerHTML = ps.map((p) => `<div class="card"><div class="row spread"><div class="row"><div class="avatar" style="background:${esc(p.color)}">${esc(p.name[0])}</div><div><b>${esc(p.name)}</b>
-     <div class="muted">${p.hasPin ? '🔒 PIN' : 'No PIN'} · ${p.dailyLimitMin == null ? 'No daily limit' : p.dailyLimitMin + ' min/day'} · ${p.maxAge == null ? 'All age ratings' : 'Films & series up to ' + AGE[p.maxAge]}${p.watchHours ? ' · ' + hoursSummary(p.watchHours) : ''}${p.blockedKeywords.length ? ' · hides: ' + esc(p.blockedKeywords.join(', ')) : ''}</div></div></div>
+     <div class="muted">${p.hasPin ? '🔒 PIN' : 'No PIN'} · ${p.dailyLimitMin == null ? 'No daily limit' : p.dailyLimitMin + ' min/day' + (p.afterLimit === 'freeview' ? ', then Freeview only' : '')} · ${p.maxAge == null ? 'All age ratings' : 'Films & series up to ' + AGE[p.maxAge]}${p.watchHours ? ' · ' + hoursSummary(p.watchHours) : ''}${p.blockedKeywords.length ? ' · hides: ' + esc(p.blockedKeywords.join(', ')) : ''}</div></div></div>
      <button class="small" data-edit="${p.id}">Edit</button></div></div>`).join('') + `<button class="primary" id="addP" style="width:100%">+ Add profile</button>`;
   $('#addP').onclick = () => editProfile(null);
   $('#app').querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => editProfile(ps.find((p) => p.id == b.dataset.edit)));
@@ -220,6 +220,9 @@ function editProfile(p) {
     ${p.hasPin ? '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="pclear" style="width:auto"> Remove PIN</label>' : ''}
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="pchild" style="width:auto" ${p.isChild ? 'checked' : ''}> Child profile</label>
     <label>Daily viewing limit (minutes, blank = unlimited)</label><input id="plim" type="number" min="0" max="1440" value="${p.dailyLimitMin ?? ''}">
+    <label>When the daily minutes run out</label>
+    <select id="pafter"><option value="lock" ${p.afterLimit !== 'freeview' ? 'selected' : ''}>🔒 Lock all TV</option><option value="freeview" ${p.afterLimit === 'freeview' ? 'selected' : ''}>📺 Freeview channels only – films &amp; series blocked</option></select>
+    <div class="muted">Freeview only: once the minutes are used up they can still watch the channels in your Freeview groups (Channels tab › 📺 Freeview channels). Outside the viewing hours below everything still stops.</div>
     <label>Viewing hours</label>
     <div class="muted">When this profile can watch TV each day. Outside these times it stops, with a 5-minute warning. Times past midnight work (e.g. 18:00 to 01:00).</div>
     <table class="hours">${DAYS.map((d, i) => { const w = (p.watchHours || [])[i] ?? null; const mode = w === 'off' ? 'off' : w ? 'set' : 'any';
@@ -247,6 +250,7 @@ function editProfile(p) {
     const body = { name: $('#pn').value, color: $('input[name=pc]:checked')?.value, isChild: $('#pchild').checked,
       dailyLimitMin: $('#plim').value === '' ? null : Number($('#plim').value), blockedKeywords: $('#pblk').value,
       maxAge: $('#page').value === '' ? null : Number($('#page').value),
+      afterLimit: $('#pafter').value,
       watchHours: rows().map((tr) => { const m = tr.querySelector('.hmode').value; return m === 'off' ? 'off' : m === 'set' ? { from: tr.querySelector('.hfrom').value, to: tr.querySelector('.hto').value } : null; }) };
     const pin = $('#ppin').value.trim();
     if (pin) body.pin = pin; else if ($('#pclear')?.checked) body.pin = null;
@@ -491,13 +495,32 @@ async function loadChannels(reload) {
     <p class="muted">Tick the channels each profile can see. Channels that come in several qualities (SD / HD / FHD / 4K) are merged into one – on the TV you pick the channel, then the quality.</p>
     <div class="row">${srcs.length > 1 ? `<select id="chs" style="flex:1">${srcs.map((x) => `<option value="${x.id}" ${x.id === st.sourceId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>` : ''}
       <select id="chp" style="flex:1">${profs.map((x) => `<option value="${x.id}" ${x.id === st.profileId ? 'selected' : ''}>👤 ${esc(x.name)}</option>`).join('')}</select>
-      <button class="small" id="chreload">↻ Reload list</button></div>
+      <button class="small" id="chreload">↻ Reload list</button><button class="small" id="chfv">📺 Freeview channels</button></div>
     <div id="chinfo" class="muted" style="margin-top:8px">Loading channels from your provider…</div></div><div id="chbody"></div>`;
   $('#chp').onchange = () => { st.profileId = Number($('#chp').value); loadChannels(); };
   if ($('#chs')) $('#chs').onchange = () => { st.sourceId = Number($('#chs').value); st.cat = ''; st.sel.clear(); loadChannels(); };
+  $('#chfv').onclick = () => loadFreeview(st.sourceId);
   $('#chreload').onclick = async () => { $('#chinfo').textContent = 'Reloading from your provider…'; try { await api('POST', '/api/admin/channels/reload', { sourceId: st.sourceId }); } catch (e) { toast(e.message); } loadChannels(); };
   try { st.data = await api('GET', `/api/admin/channels?sourceId=${st.sourceId}&profileId=${st.profileId}`); } catch (e) { $('#chinfo').textContent = e.message; return; }
   renderChannels();
+}
+
+// 📺 which live categories count as Freeview (still watchable when a "Freeview only" profile runs out of minutes)
+async function loadFreeview(sourceId) {
+  $('#chbody').innerHTML = '<div class="card muted">Loading categories…</div>';
+  let d; try { d = await api('GET', `/api/admin/freeview?sourceId=${sourceId}`); } catch (e) { $('#chbody').innerHTML = `<div class="card">${esc(e.message)}</div>`; return; }
+  const cats = [...d.categories].sort((a, b) => (b.freeview - a.freeview) || (b.suggested - a.suggested) || a.name.localeCompare(b.name));
+  $('#chbody').innerHTML = `<div class="card"><h3>📺 Freeview channels</h3>
+    <p class="muted">Tick the channel groups that count as Freeview. Profiles set to <b>Freeview channels only</b> (Profiles › edit › When the daily minutes run out) can keep watching these after their time is used up – films, series and every other channel stay blocked.${d.chosen ? '' : ' <b>Nothing saved yet</b> – groups with "Freeview" in the name are ticked for you.'}</p>
+    <div class="row"><input id="fvq" placeholder="Search groups" style="flex:1"><button class="small" id="fvnone">☐ Untick all</button><button class="small primary" id="fvsave">Save</button><button class="small" id="fvback">Back to channels</button></div>
+    <div id="fvlist" style="margin-top:10px;max-height:60vh;overflow:auto">${cats.map((c) => `<label class="fvrow" data-n="${esc(c.name.toLowerCase())}" style="display:flex;gap:8px;align-items:center;margin:4px 0"><input type="checkbox" value="${esc(c.id)}" style="width:auto" ${c.freeview ? 'checked' : ''}> ${esc(c.name)} <span class="muted">(${c.channels})</span>${c.suggested ? ' <span class="pill">Freeview?</span>' : ''}</label>`).join('') || '<div class="muted">No categories from this source.</div>'}</div></div>`;
+  $('#fvq').oninput = () => { const q = $('#fvq').value.trim().toLowerCase(); document.querySelectorAll('#fvlist .fvrow').forEach((r) => { r.style.display = !q || r.dataset.n.includes(q) ? 'flex' : 'none'; }); };
+  $('#fvnone').onclick = () => document.querySelectorAll('#fvlist input').forEach((i) => { i.checked = false; });
+  $('#fvback').onclick = () => renderChannels();
+  $('#fvsave').onclick = async () => {
+    const ids = [...document.querySelectorAll('#fvlist input:checked')].map((i) => i.value);
+    try { await api('PUT', '/api/admin/freeview', { sourceId, categoryIds: ids }); toast(`Saved – ${ids.length} Freeview group${ids.length === 1 ? '' : 's'}`); } catch (e) { toast(e.message); }
+  };
 }
 
 function renderChannels() {
