@@ -182,6 +182,9 @@ for (const sql of [
   'CREATE TABLE IF NOT EXISTS watchlist (profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE, item_key TEXT NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (profile_id, item_key))',
   // episode count per series (reported by the TV) so a fully watched series can show a tick
   'CREATE TABLE IF NOT EXISTS series_totals (source_id INTEGER NOT NULL, series_id TEXT NOT NULL, total INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (source_id, series_id))',
+  // when a series last gained episodes (for the "New episodes" row), and which app build each TV runs
+  'ALTER TABLE series_totals ADD COLUMN grown_at INTEGER',
+  'ALTER TABLE devices ADD COLUMN app_build TEXT',
 ]) {
   try { db.exec(sql); } catch { /* already exists */ }
 }
