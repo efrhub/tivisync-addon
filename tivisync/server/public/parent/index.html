@@ -306,6 +306,9 @@ async function loadTvs() {
     `<div class="card"><h3>🩺 Weekly check-up</h3><p class="muted">Every Sunday at 18:00 the phones in <b>notify_services</b> get a short report: TVs that haven't updated or been seen, VPN drops, and whether chore TV time is reaching TiviSync.</p>
       <pre id="wkBox" style="white-space:pre-wrap;font-size:12px;background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:8px;margin:0">Loading…</pre>
       <div class="row" style="margin-top:8px"><button class="small" id="wkRef">Refresh</button><button class="small primary" id="wkSend">Send to phones now</button></div></div>` +
+    `<div class="card"><h3>📋 Today cameras</h3><p class="muted">The live camera pictures on the TV's 📋 Today screen. Untick <b>Show</b> to hide a camera (e.g. the garden in summer). Tick people to show it only to them – leave everyone unticked and all profiles see it.</p>
+      <div id="tcBox" class="muted">Loading…</div>
+      <div class="row" style="margin-top:8px"><button class="small primary" id="tcSave">Save</button></div></div>` +
     `<div class="card"><h3>📷 Camera alerts on the TVs</h3><p class="muted">When one of these sensors sees someone, every TV shows a small box in the top right for 5 seconds (it never pauses). Leave the times empty for all day, or set e.g. 22:00 to 06:30 – that runs over midnight. Untick days to skip them.</p>
       <div id="camBox" class="muted">Loading…</div>
       <div class="row" style="margin-top:8px"><button class="small" id="camAdd">+ Add alert</button><button class="small primary" id="camSave">Save alerts</button></div></div>` +
@@ -341,6 +344,24 @@ async function loadTvs() {
       c.cameras.map((x) => `<option value="${esc(x)}" ${x === c.setting ? 'selected' : ''}>${esc(x)}</option>`).join('');
   }).catch((e) => { $('#dbCam').innerHTML = `<option>${esc(e.message)}</option>`; });
   $('#dbCamSave').onclick = async () => { try { await api('PUT', '/api/admin/doorbell-camera', { camera: $('#dbCam').value }); toast('Saved'); } catch (e) { toast(e.message); } };
+  // --- Today cameras
+  api('GET', '/api/admin/today-cameras').then((t) => {
+    if (!t.cameras.length) { $('#tcBox').textContent = 'No cameras found in Home Assistant.'; return; }
+    $('#tcBox').innerHTML = t.cameras.map((c) => {
+      const o = t.settings[c.entity] || {}, ps = (o.profiles || []).map(Number);
+      return `<div class="camline" data-tc="${esc(c.entity)}" style="margin:6px 0;flex-wrap:wrap"><b style="min-width:150px">${esc(c.name)}</b><label style="display:inline-flex;align-items:center;gap:4px;margin:0 14px 0 0"><input type="checkbox" data-tcshow ${o.hidden ? '' : 'checked'}> Show</label>${c.unavailable ? '<span class="muted">(offline)</span>' : ''}
+        <span class="muted">For:</span>${t.profiles.map((p) => `<label style="display:inline-flex;align-items:center;gap:4px;margin:0 10px 0 0"><input type="checkbox" data-tcp="${p.id}" ${ps.includes(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`).join('')}
+        <span class="muted" data-tcall>${ps.length ? '' : '(everyone)'}</span></div>`;
+    }).join('');
+    $('#tcBox').onchange = (e) => { const row = e.target.closest('[data-tc]'); if (row) row.querySelector('[data-tcall]').textContent = row.querySelector('[data-tcp]:checked') ? '' : '(everyone)'; };
+  }).catch((e) => { $('#tcBox').textContent = e.message; });
+  $('#tcSave').onclick = async () => {
+    const settings = {};
+    document.querySelectorAll('#tcBox [data-tc]').forEach((r) => {
+      settings[r.dataset.tc] = { hidden: !r.querySelector('[data-tcshow]').checked, profiles: [...r.querySelectorAll('[data-tcp]:checked')].map((x) => Number(x.dataset.tcp)) };
+    });
+    try { await api('PUT', '/api/admin/today-cameras', { settings }); toast('Saved – the TVs show it within a minute'); } catch (e) { toast(e.message); }
+  };
   // --- weekly check-up
   const wkShow = () => api('GET', '/api/admin/weekly-report').then((r) => { $('#wkBox').textContent = `${r.title}\n\n${r.message}`; }).catch((e) => { $('#wkBox').textContent = e.message; });
   wkShow(); $('#wkRef').onclick = wkShow;
