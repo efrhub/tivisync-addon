@@ -171,6 +171,7 @@ for (const sql of [
   'ALTER TABLE sources ADD COLUMN backup_urls TEXT',
   'ALTER TABLE profiles ADD COLUMN max_age INTEGER',
   'ALTER TABLE profiles ADD COLUMN watch_hours TEXT', // JSON: 7 entries Mon..Sun, each null (any time) | {from,to} | "off"
+  "ALTER TABLE profiles ADD COLUMN after_limit TEXT NOT NULL DEFAULT 'lock'", // 'lock' | 'freeview' when the daily minutes run out
   'CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)',
   // diagnostic log lines sent by the TV / phone apps (kept 7 days)
   'CREATE TABLE IF NOT EXISTS device_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER NOT NULL, ts INTEGER NOT NULL, level TEXT NOT NULL, tag TEXT NOT NULL, msg TEXT NOT NULL)',
