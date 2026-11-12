@@ -1304,9 +1304,21 @@ route('GET', '/api/tv/dashboard', 'device', async () => {
   let states = [];
   try { states = await haStatesAll(); } catch (e) { console.warn(`Dashboard: ${e.message}`); }
   const name = (s) => String(s.attributes?.friendly_name || s.entity_id.split('.')[1].replace(/_/g, ' '));
-  const people = states.filter((s) => s.entity_id.startsWith('person.')).map((s) => ({
-    name: name(s).split(' ')[0], home: s.state === 'home',
-    where: s.state === 'home' ? 'Home' : s.state === 'not_home' ? 'Out' : s.state === 'unknown' || s.state === 'unavailable' ? '?' : s.state.replace(/_/g, ' ') }));
+  // Family Planner knows why someone's out and until when (work, school, an activity, a night away)
+  let whereabouts = [];
+  try {
+    const r = await fetch(`${FP_URL()}/api/internal/tv-whereabouts`, { signal: AbortSignal.timeout(4000) });
+    if (r.ok) whereabouts = await r.json();
+  } catch { /* Family Planner not reachable – just home / out */ }
+  const fpFor = (first) => whereabouts.find((w) => String(w.name || '').trim().split(' ')[0].toLowerCase() === first.toLowerCase());
+  const dayName = (d) => new Date(d + 'T12:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'UTC' });
+  const people = states.filter((s) => s.entity_id.startsWith('person.')).map((s) => {
+    const first = name(s).split(' ')[0], home = s.state === 'home';
+    let where = home ? 'Home' : s.state === 'not_home' ? 'Out' : s.state === 'unknown' || s.state === 'unavailable' ? '?' : s.state.replace(/_/g, ' ');
+    const w = !home && fpFor(first);
+    if (w) where = w.until ? `${w.label} · till ${w.until}` : `${w.label} · back ${w.back === today(now() + 86400_000) ? 'tomorrow' : dayName(w.back)}${w.backTime ? ' ' + w.backTime : ''}`;
+    return { name: first, home, where };
+  });
   const open = states.filter((s) => s.entity_id.startsWith('binary_sensor.') && s.state === 'on' && ['door', 'window', 'opening', 'garage_door'].includes(s.attributes?.device_class))
     .map((s) => name(s).replace(/\s*(opening|contact|sensor)$/i, '')).filter((v, i, a) => a.indexOf(v) === i).slice(0, 12);
   const cams = states.filter((s) => s.entity_id.startsWith('camera.') && s.state !== 'unavailable').map((s) => ({ entity: s.entity_id, name: name(s).replace(/\s*fluent$/i, '') })).slice(0, 8);
