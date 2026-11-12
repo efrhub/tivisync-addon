@@ -761,6 +761,24 @@ function isBusy(id, { date, time }) {
     (w.date === date && w.start <= time && (w.end <= w.start || time < w.end)) ||
     (w.date === yesterday && w.end <= w.start && time < w.end)));
 }
+/* What someone is doing right now and when they're back – the same things isBusy looks at. */
+function whereNow(id, { date, time }) {
+  const yesterday = addDay(date, -1);
+  const w = Object.values(db.work).find(w => w.memberId === id && ((w.date === date && w.start <= time && (w.end <= w.start || time < w.end)) || (w.date === yesterday && w.end <= w.start && time < w.end)));
+  if (w) return { label: 'At work', until: w.end };
+  const t = db.schedules[id]?.days?.[dayNum(date)];
+  if (t && !onHoliday(id, date) && t.start <= time && time < t.end) return { label: 'At school', until: t.end };
+  const o = Object.values(db.outings).find(o => o.memberId === id && outingOn(o, date) && o.start && time >= o.start && time < o.end);
+  if (o) return { label: o.activity || 'Out', until: o.end };
+  const a = Object.values(db.away).find(a => a.memberId === id && (sameDayAway(a) ? date === a.from && time >= a.leave && time < a.back : a.allDay !== false ? a.from <= date && a.to >= date :
+    (date > a.from && date <= a.to) || (date === a.from && time >= a.leave) || (date === addDay(a.to, 1) && time < a.back)));
+  if (a) {
+    if (sameDayAway(a) || (a.allDay === false && date === addDay(a.to, 1))) return { label: a.reason || 'Out', until: a.back };
+    const back = a.allDay === false ? addDay(a.to, 1) : addDay(a.to, 1);
+    return { label: a.reason || 'Away', until: '', back, backTime: a.allDay === false ? a.back || '' : '' };
+  }
+  return null;
+}
 /* A chore's person and date after any one-off move, second person or night away. */
 function isBirthday(id, date) {
   const dob = db.logins[id]?.dob; if (!dob) return false;
@@ -1225,6 +1243,13 @@ async function api(req, res, url) {
     const r = remindersFor({ id, ...activeRoles(l) });
     const chores = r.ids.filter(cid => db.chores[cid]).map(cid => db.chores[cid].title);
     return send(res, 200, { linked: true, name: db.members[id].name, chores });
+  }
+  /* TiviSync's Today screen: where people are right now and until when (work, school, an activity, away). */
+  if (route[0] === 'internal' && route[1] === 'tv-whereabouts' && method === 'GET') {
+    if (!/^(::ffff:)?172\.3[0-3]\./.test(req.socket.remoteAddress || '')) return fail(res, 403, 'Request refused.');
+    const clock = houseClock(), out = [];
+    for (const [id, m] of Object.entries(db.members)) { const w = whereNow(id, clock); if (w) out.push({ name: m.name, ...w }); }
+    return send(res, 200, out);
   }
   /* TiviSync's "Who's watching?" screen: household reminders (not ones for particular people), nights in and takeaway or eating out, for today and tomorrow. */
   if (route[0] === 'internal' && route[1] === 'tv-reminders' && method === 'GET') {
