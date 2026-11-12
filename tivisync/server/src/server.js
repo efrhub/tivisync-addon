@@ -1299,7 +1299,25 @@ async function weather(states) {
   return weatherCache.data;
 }
 const dashCache = { at: 0, data: null };
-route('GET', '/api/tv/dashboard', 'device', async () => {
+// 📋 Today cameras: which cameras show on the Today tab, and for whom. { [entity]: { hidden, profiles: [ids] } } – no profiles ticked = everyone
+function todayCameraSettings() { try { return JSON.parse(getSetting('today_cameras') || '{}') || {}; } catch { return {}; } }
+function todayCamerasFor(cams, profileId) {
+  const set = todayCameraSettings();
+  return cams.filter((c) => {
+    const o = set[c.entity];
+    if (!o) return true;
+    if (o.hidden) return false;
+    const ps = Array.isArray(o.profiles) ? o.profiles.map(Number) : [];
+    return !ps.length || (profileId != null && ps.includes(Number(profileId)));
+  });
+}
+route('GET', '/api/tv/dashboard', 'device', async (req) => {
+  let profileId = null;
+  try { profileId = authProfile(req).profile.id; } catch { /* nobody signed in yet – only "everyone" cameras */ }
+  const data = await dashboardData();
+  return { ...data, cameras: todayCamerasFor(data.cameras, profileId) };
+});
+async function dashboardData() {
   if (dashCache.data && now() - dashCache.at < 45_000) return dashCache.data;
   let states = [];
   try { states = await haStatesAll(); } catch (e) { console.warn(`Dashboard: ${e.message}`); }
@@ -1327,6 +1345,23 @@ route('GET', '/api/tv/dashboard', 'device', async () => {
   const data = { weather: await weather(states), people, jobs, reminders: await homeReminders(), open, cameras: cams };
   dashCache.data = data; dashCache.at = now();
   return data;
+}
+route('GET', '/api/admin/today-cameras', 'admin', async () => {
+  let states = [];
+  try { states = await haStatesAll(); } catch { /* not linked */ }
+  const cameras = states.filter((s) => s.entity_id.startsWith('camera.'))
+    .map((s) => ({ entity: s.entity_id, name: String(s.attributes?.friendly_name || s.entity_id.split('.')[1].replace(/_/g, ' ')).replace(/\s*fluent$/i, ''), unavailable: s.state === 'unavailable' }));
+  return { cameras, profiles: db.prepare('SELECT id, name FROM profiles ORDER BY name').all(), settings: todayCameraSettings() };
+});
+route('PUT', '/api/admin/today-cameras', 'admin', async (req, b) => {
+  const out = {};
+  for (const [entity, o] of Object.entries(b.settings || {})) {
+    if (!/^camera\.[a-z0-9_]+$/.test(entity)) throw new HttpError(400, `Not a camera: ${entity}`);
+    const profiles = (Array.isArray(o?.profiles) ? o.profiles : []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    if (o?.hidden || profiles.length) out[entity] = { hidden: !!o?.hidden, profiles };
+  }
+  setSetting('today_cameras', JSON.stringify(out));
+  return { settings: out };
 });
 
 // --- radio: UK (or any) stations from the free Radio Browser directory (radio-browser.info)
