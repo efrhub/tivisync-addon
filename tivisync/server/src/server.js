@@ -111,6 +111,7 @@ function profileRow(p, includeAdmin = false) {
     blockedKeywords: p.blocked_keywords ? p.blocked_keywords.split(',').map((s) => s.trim()).filter(Boolean) : [],
     maxAge: p.max_age ?? null, // age-rating limit for films/series (null = no limit)
     watchHours: parseHours(p.watch_hours), // 7 entries Mon..Sun: null = any time, {from,to} "HH:MM", or "off"
+    afterLimit: p.after_limit === 'freeview' ? 'freeview' : 'lock', // when the daily minutes run out: lock everything, or Freeview channels only
   };
   if (includeAdmin) out.createdAt = p.created_at;
   return out;
@@ -200,8 +201,12 @@ function allowance(profileId) {
   const limitSec = p.daily_limit_min * 60 + u.bonus_seconds;
   const byLimit = Math.max(0, limitSec - u.seconds);
   const remainingSec = windowLeft != null ? Math.min(byLimit, windowLeft) : byLimit;
-  return { ...base, limited: true, allowed: remainingSec > 0, reason: remainingSec > 0 ? null : 'limit', canAsk: true,
-    limitSec, remainingSec, message: remainingSec > 0 ? null : 'Daily TV time used up' };
+  const out = remainingSec > 0;
+  // minutes used up (not bedtime): this profile may still watch the Freeview channels – films, series and other channels stay blocked.
+  // allowed stays false so older app builds still lock everything.
+  const freeviewOnly = !out && byLimit <= 0 && p.after_limit === 'freeview';
+  return { ...base, limited: true, allowed: out, reason: out ? null : 'limit', canAsk: true, freeviewOnly,
+    limitSec, remainingSec, message: out ? null : freeviewOnly ? 'Daily TV time used up – Freeview channels only' : 'Daily TV time used up' };
 }
 
 function addBonus(profileId, minutes) {
@@ -329,6 +334,7 @@ function validateProfile(b, partial) {
     out.max_age = a;
   }
   if (b.watchHours !== undefined) out.watch_hours = validateHours(b.watchHours);
+  if (b.afterLimit !== undefined) out.after_limit = b.afterLimit === 'freeview' ? 'freeview' : 'lock';
   if (b.blockedKeywords !== undefined) {
     const arr = Array.isArray(b.blockedKeywords) ? b.blockedKeywords : String(b.blockedKeywords).split(',');
     out.blocked_keywords = arr.map((s) => String(s).trim()).filter(Boolean).join(',');
@@ -347,6 +353,7 @@ route('POST', '/api/admin/profiles', 'admin', async (req, b) => {
     VALUES (?, ?, ?, ?, ?, ?, ?)`).run(v.name, v.color || '#3b82f6', v.pin_hash ?? null, v.is_child ?? 0, v.daily_limit_min ?? null, v.blocked_keywords ?? '', now());
   if (v.max_age !== undefined) db.prepare('UPDATE profiles SET max_age = ? WHERE id = ?').run(v.max_age, r.lastInsertRowid);
   if (v.watch_hours !== undefined) db.prepare('UPDATE profiles SET watch_hours = ? WHERE id = ?').run(v.watch_hours, r.lastInsertRowid);
+  if (v.after_limit !== undefined) db.prepare('UPDATE profiles SET after_limit = ? WHERE id = ?').run(v.after_limit, r.lastInsertRowid);
   return profileRow(db.prepare('SELECT * FROM profiles WHERE id = ?').get(r.lastInsertRowid), true);
 });
 
@@ -1199,7 +1206,7 @@ route('GET', '/api/tv/bootstrap', 'device', async (req, b, p, ctx) => ({
 route('GET', '/api/tv/profiles-status', 'device', async () =>
   db.prepare('SELECT id FROM profiles ORDER BY id').all().map(({ id }) => {
     const a = allowance(id);
-    return { id, allowed: a.allowed, limited: a.limited, timeLeftSec: a.limited && a.remainingSec != null ? a.remainingSec : null, reason: a.reason };
+    return { id, allowed: a.allowed, limited: a.limited, timeLeftSec: a.limited && a.remainingSec != null ? a.remainingSec : null, reason: a.reason, freeviewOnly: !!a.freeviewOnly };
   }));
 
 route('POST', '/api/tv/profiles/:id/login', 'device', async (req, b, { id }, ctx) => {
@@ -1976,6 +1983,82 @@ route('POST', '/api/admin/channels/merge', 'admin', async (req, b) => {
   return { ok: true, key };
 });
 
+// 📺 Freeview channels: the live categories (per source) kids can still watch once their daily minutes are used up
+const freeviewCats = (sourceId) => { try { const v = JSON.parse(getSetting('freeview_cats:' + sourceId) || 'null'); return Array.isArray(v) ? v.map(String) : null; } catch { return null; } };
+const FREEVIEW_GUESS = /free\s*view|\bfta\b|free\s*to\s*air/i;
+function freeviewCatIds(sourceId, categories) {
+  const set = freeviewCats(sourceId);
+  return set != null ? set : categories.filter((c) => FREEVIEW_GUESS.test(c.name)).map((c) => c.id); // nothing chosen yet: anything called "Freeview"
+}
+route('GET', '/api/admin/freeview', 'admin', async (req) => {
+  const src = sourceById(new URL(req.url, 'http://x').searchParams.get('sourceId'));
+  const list = await chan.channelsFor(src, { filesDir: FILES_DIR, hosted: HOSTED });
+  const ids = new Set(freeviewCatIds(src.id, list.categories));
+  const counts = {}; for (const ch of list.channels) counts[ch.categoryId] = (counts[ch.categoryId] || 0) + 1;
+  return { sourceId: src.id, chosen: freeviewCats(src.id) != null, error: list.error || null,
+    categories: list.categories.map((c) => ({ id: c.id, name: c.name, channels: counts[c.id] || 0, freeview: ids.has(c.id), suggested: FREEVIEW_GUESS.test(c.name) })) };
+});
+route('PUT', '/api/admin/freeview', 'admin', async (req, b) => {
+  const src = sourceById(b.sourceId);
+  const ids = (Array.isArray(b.categoryIds) ? b.categoryIds : []).map(String).slice(0, 500);
+  setSetting('freeview_cats:' + src.id, JSON.stringify(ids));
+  return { sourceId: src.id, categoryIds: ids };
+});
+
+// 🖼 missing channel logos: filled from the free tv-logo/tv-logos collection on GitHub (UK + a few others), refreshed weekly
+const LOGO_REPO = 'https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/';
+const LOGO_DIRS = ['united-kingdom', 'ireland', 'united-states', 'international'];
+const logoIndex = { at: 0, map: null, loading: null };
+const compactName = (s) => String(s || '').toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]/g, '');
+function cleanChannelName(name) {
+  let n = String(name || '')
+    .replace(/^\s*(\[[^\]]*\]|\([^)]*\)|[A-Z]{2,3}\s*[:|\-–]|[A-Z]{2,3}\s*\|)\s*/i, '') // "UK: ", "[UK] ", "UK | "
+    .replace(/[ᴴᴰᵁᴴᴰ⁴ᴷ]+/g, ' ')
+    .replace(/\b(f?hd|uhd|sd|4k|8k|hevc|h\.?26[45]|50\s*fps|60\s*fps|raw|vip|backup|alt|multi|\d{3,4}p)\b/gi, ' ')
+    .replace(/\+\s*1\b/g, ' ').replace(/[|:()[\]]/g, ' ').replace(/\s+/g, ' ').trim();
+  n = n.replace(/\b(bbc|itv|channel)\s*([1-4])\b/i, (m, a, d) => a.toLowerCase() === 'bbc' ? `${a} ${['one', 'two', 'three', 'four'][d - 1]}` : `${a} ${d}`);
+  return n;
+}
+async function loadLogoIndex() {
+  if (logoIndex.map && now() - logoIndex.at < 7 * 86400_000) return logoIndex.map;
+  if (logoIndex.loading) return logoIndex.loading;
+  logoIndex.loading = (async () => {
+    try { const c = JSON.parse(getSetting('logo_index') || 'null'); if (c && now() - c.at < 7 * 86400_000) { logoIndex.map = c.map; logoIndex.at = c.at; return c.map; } } catch { /* rebuild */ }
+    const map = {};
+    for (const dir of LOGO_DIRS) {
+      try {
+        const r = await fetch(`https://api.github.com/repos/tv-logo/tv-logos/contents/countries/${dir}?per_page=1000`, { headers: { 'User-Agent': 'TiviSync', Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(15000) });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        for (const f of await r.json()) {
+          if (!/\.(png|svg)$/i.test(f.name)) continue;
+          const base = f.name.replace(/\.(png|svg)$/i, '').replace(/-(uk|ie|us|int|gb)$/i, '');
+          const url = LOGO_REPO + dir + '/' + f.name;
+          for (const k of new Set([compactName(base), compactName(base.replace(/-(hd|uhd)$/i, ''))])) if (k && !map[k]) map[k] = url;
+        }
+      } catch (e) { console.warn(`Logos: ${dir}: ${e.message}`); }
+    }
+    if (Object.keys(map).length) { logoIndex.map = map; logoIndex.at = now(); setSetting('logo_index', JSON.stringify({ at: logoIndex.at, map })); console.log(`Logos: ${Object.keys(map).length} known channel logos`); }
+    return logoIndex.map || {};
+  })().finally(() => { logoIndex.loading = null; });
+  return logoIndex.loading;
+}
+function logoFor(name, map) {
+  if (!map) return null;
+  const clean = cleanChannelName(name), k = compactName(clean);
+  if (!k) return null;
+  return map[k] || map[k.replace(/(hd|uhd)$/, '')] || map[compactName(clean.replace(/\b(tv|channel)\b/gi, ''))] || null;
+}
+// logos for channels the provider sends without one (ref -> url); the logo collection loads in the background the first time
+async function missingLogos(list) {
+  const missing = list.channels.filter((ch) => !ch.logo);
+  if (!missing.length || process.env.NO_LOGOS) return {};
+  const map = logoIndex.map || (await Promise.race([loadLogoIndex(), new Promise((r) => setTimeout(() => r(null), 3000))]));
+  const out = {};
+  if (map) for (const ch of missing) { const u = logoFor(ch.name, map); if (u) out[ch.ref] = u; }
+  return out;
+}
+setTimeout(() => { if (!process.env.NO_LOGOS) loadLogoIndex().catch(() => {}); }, 60_000).unref();
+
 // what the TV app needs: channels hidden for this profile + merged channels with their qualities
 route('GET', '/api/tv/channels/layout', 'profile', async (req, b, p, { profile }) => {
   const src = sourceById(new URL(req.url, 'http://x').searchParams.get('sourceId'));
@@ -1987,7 +2070,14 @@ route('GET', '/api/tv/channels/layout', 'profile', async (req, b, p, { profile }
   }
   const groups = chan.buildGroups(list.channels, chanCfg(src.id)).filter((g) => g.members.length > 1)
     .map((g) => ({ key: g.key, name: g.name, default: g.default, members: g.members.map((m) => ({ ref: m.ref, label: m.label })) }));
-  return { hidden, groups };
+  // Freeview channels this profile can still watch when the daily minutes are used up
+  let freeview = [], freeviewCategories = [];
+  if (profile.after_limit === 'freeview') {
+    freeviewCategories = freeviewCatIds(src.id, list.categories);
+    const cats = new Set(freeviewCategories), hid = new Set(hidden);
+    freeview = list.channels.filter((ch) => cats.has(String(ch.categoryId)) && !hid.has(ch.ref)).map((ch) => ch.ref);
+  }
+  return { hidden, groups, freeview, freeviewCategories, logos: await missingLogos(list) };
 });
 
 // --- move playback to another TV ("handoff") ---
