@@ -351,7 +351,7 @@ async function loadTvs() {
     $('#jobBox').innerHTML = ov.profiles.map((p) => `<label class="ck"><input type="checkbox" data-jp="${p.id}" ${ja.profiles.includes(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`).join('') || 'No profiles yet.';
   }).catch((e) => { $('#jobBox').textContent = e.message; });
   $('#jobSave').onclick = async () => { const ids = [...document.querySelectorAll('[data-jp]')].filter((x) => x.checked).map((x) => +x.dataset.jp); await api('PUT', '/api/admin/job-alerts', { profiles: ids }); toast('Saved'); };
-  $('#jobTest').onclick = async () => { const r = await api('POST', '/api/admin/job-done', { who: 'Test', title: 'Empty the dishwasher' }); toast(r.badge ? 'Sent to those TVs' : 'Tick at least one profile and Save first'); };
+  $('#jobTest').onclick = async () => { const r = await api('POST', '/api/admin/job-done', { who: 'Test from the panel', title: 'Test job' }); toast(r.badge ? 'Sent to those TVs' : 'Tick at least one profile and Save first'); };
   // --- camera alerts
   let camData = { alerts: [], sensors: [] };
   const DAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
