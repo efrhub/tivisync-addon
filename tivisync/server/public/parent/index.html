@@ -315,6 +315,7 @@ async function loadTvs() {
       <div class="row" style="margin-top:8px"><button class="small primary" id="tcSave">Save</button></div></div>` +
     `<div class="card"><h3>📷 Camera alerts on the TVs</h3><p class="muted">When one of these sensors sees someone, every TV shows a small box in the top right for 5 seconds (it never pauses). Leave the times empty for all day, or set e.g. 22:00 to 06:30 – that runs over midnight. Untick days to skip them.</p>
       <div id="camBox" class="muted">Loading…</div>
+      <div class="camline" style="margin-top:8px"><span class="muted">Show each camera at most once every</span><select id="camCool" style="width:auto">${[[20, '20 seconds'], [60, '1 minute'], [120, '2 minutes'], [300, '5 minutes'], [600, '10 minutes']].map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></div>
       <div class="row" style="margin-top:8px"><button class="small" id="camAdd">+ Add alert</button><button class="small primary" id="camSave">Save alerts</button></div></div>` +
     `<div class="card"><h3>✅ Job done alerts</h3><p class="muted">When someone ticks off a job in Family Planner, a small box (e.g. "✅ Lisa – Done: Empty the dishwasher") shows for a few seconds on the TVs where these profiles are signed in.</p>
       <div id="jobBox" class="camline">Loading…</div>
@@ -406,13 +407,13 @@ async function loadTvs() {
     document.querySelectorAll('[data-camdel]').forEach((b) => b.onclick = () => { camData.alerts = camRead(); camData.alerts.splice(+b.dataset.camdel, 1); camDraw(); });
     document.querySelectorAll('[data-camtest]').forEach((b) => b.onclick = async () => { const a = camRead()[+b.dataset.camtest]; await api('POST', '/api/admin/badge', { alert: a }); toast('Sent to the TVs'); });
   };
-  api('GET', '/api/admin/camera-alerts').then((d) => { camData = d; camDraw(); }).catch((e) => { $('#camBox').textContent = e.message; });
+  api('GET', '/api/admin/camera-alerts').then((d) => { camData = d; camDraw(); if ($('#camCool')) $('#camCool').value = String([20, 60, 120, 300, 600].reduce((x, y) => Math.abs(y - (d.cooldownSec || 120)) < Math.abs(x - (d.cooldownSec || 120)) ? y : x)); }).catch((e) => { $('#camBox').textContent = e.message; });
   $('#camAdd').onclick = () => { camData.alerts = camRead(); camData.alerts.push({ name: '', entity: '', from: '', to: '', days: [], enabled: true }); camDraw(); };
   $('#camSave').onclick = async () => {
     const list = camRead();
     if (list.some((a) => !a.entity)) return toast('Choose a sensor for every alert');
     if (list.some((a) => (a.from && !a.to) || (!a.from && a.to))) return toast('Set both times, or leave both empty');
-    try { const r = await api('PUT', '/api/admin/camera-alerts', { alerts: list }); camData.alerts = r.alerts; camDraw(); toast('Camera alerts saved'); } catch (e) { toast(e.message); }
+    try { const r = await api('PUT', '/api/admin/camera-alerts', { alerts: list, cooldownSec: Number($('#camCool').value) }); camData.alerts = r.alerts; camDraw(); toast('Camera alerts saved'); } catch (e) { toast(e.message); }
   };
   $('#annBell').onclick = async () => { await api('POST', '/api/admin/announce', { kind: 'doorbell' }); toast('Doorbell sent to the TVs'); };
   api('GET', '/api/admin/remote').then((r) => { $('#remBox').innerHTML = r.url
