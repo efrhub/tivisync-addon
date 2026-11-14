@@ -483,6 +483,11 @@ function sendBack(user, logId, l, c, noteText, photo, needPhoto) {
   Object.assign(c, { due: l.prevDue, done: false, assignee: l.prevAssignee || '', returned });
   if (l.prevSched) c.sched = l.prevSched; else delete c.sched;
   if (l.prevDoneBy) { if (l.prevDoneBy.length) c.doneBy = l.prevDoneBy; else delete c.doneBy; }
+  /* It goes back to the person who did it, not on to the next person in the rota or a cover.
+   * Done as a one-time swap, so once it is redone the rota carries on from where it was. */
+  delete c.once;
+  const doer = !c.everyone && l.by && db.members[l.by] ? l.by : '';
+  if (doer && choreNow(c, houseClock().date).who !== doer) c.once = { date: c.due, assignee: doer };
   const who = choreNow(c, houseClock().date).who, whoName = db.members[who]?.name;
   const text = `Sent back: ${l.title}${whoName ? ` (${whoName})` : ''}${noteText ? `. ${noteText}` : ''}`;
   const mid = docId();
