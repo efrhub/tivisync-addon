@@ -2051,6 +2051,28 @@ function freeviewCatIds(sourceId, categories) {
   const set = freeviewCats(sourceId);
   return set != null ? set : categories.filter((c) => FREEVIEW_GUESS.test(c.name)).map((c) => c.id); // nothing chosen yet: anything called "Freeview"
 }
+// ✏️ your own names for the provider's channel groups (live categories), per source: { categoryId: "Entertainment" }
+const groupNames = (sourceId) => { try { const v = JSON.parse(getSetting('cat_names:' + sourceId) || '{}'); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; } catch { return {}; } };
+route('GET', '/api/admin/group-names', 'admin', async (req) => {
+  const src = sourceById(new URL(req.url, 'http://x').searchParams.get('sourceId'));
+  const list = await chan.channelsFor(src, { filesDir: FILES_DIR, hosted: HOSTED });
+  const names = groupNames(src.id);
+  const counts = {}; for (const ch of list.channels) counts[ch.categoryId] = (counts[ch.categoryId] || 0) + 1;
+  return { sourceId: src.id, error: list.error || null,
+    categories: list.categories.map((c) => ({ id: String(c.id), name: c.name, rename: names[String(c.id)] || '', channels: counts[c.id] || 0 })) };
+});
+// { sourceId, names: { categoryId: newName } } – a blank name puts the provider's name back
+route('PUT', '/api/admin/group-names', 'admin', async (req, b) => {
+  const src = sourceById(b.sourceId);
+  const names = {};
+  for (const [k, v] of Object.entries(b.names && typeof b.names === 'object' ? b.names : {}).slice(0, 2000)) {
+    const n = String(v ?? '').trim().slice(0, 60);
+    if (n) names[String(k)] = n;
+  }
+  setSetting('cat_names:' + src.id, JSON.stringify(names));
+  return { sourceId: src.id, renamed: Object.keys(names).length };
+});
+
 route('GET', '/api/admin/freeview', 'admin', async (req) => {
   const src = sourceById(new URL(req.url, 'http://x').searchParams.get('sourceId'));
   const list = await chan.channelsFor(src, { filesDir: FILES_DIR, hosted: HOSTED });
@@ -2138,7 +2160,7 @@ route('GET', '/api/tv/channels/layout', 'profile', async (req, b, p, { profile }
     const cats = new Set(freeviewCategories), hid = new Set(hidden);
     freeview = list.channels.filter((ch) => cats.has(String(ch.categoryId)) && !hid.has(ch.ref)).map((ch) => ch.ref);
   }
-  return { hidden, groups, freeview, freeviewCategories, logos: await missingLogos(list) };
+  return { hidden, groups, freeview, freeviewCategories, logos: await missingLogos(list), groupNames: groupNames(src.id) };
 });
 
 // --- move playback to another TV ("handoff") ---
