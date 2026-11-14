@@ -893,13 +893,16 @@ function currentAnnouncement(profile = null) {
 }
 // Small badge in the top-right corner of the TVs (a person on a camera, a job ticked off in Family Planner…).
 // Never pauses or speaks. HA event tivisync_badge { camera: 'Front door', sub?: 'Person seen', icon?: '🚶', seconds?: 5 }.
-// `profiles` (ids) limits it to TVs where one of those profiles is signed in. Same text at most every 20 s.
+// `profiles` (ids) limits it to TVs where one of those profiles is signed in. Same text at most every 20 s;
+// camera "seen" alerts at most once per camera every `badge_cooldown` seconds (default 2 minutes) so a busy room doesn't keep popping up.
 const badges = [];
+function badgeCooldownSec() { const v = Number(getSetting('badge_cooldown')); return Number.isFinite(v) && v >= 20 ? v : 120; }
 function addBadge(d = {}) {
   const camera = String(d.camera || d.title || 'Camera').trim().slice(0, 40);
   const sub = String(d.sub || 'Person seen').trim().slice(0, 80);
   const at = now();
-  if (badges.some((b) => b.camera.toLowerCase() === camera.toLowerCase() && b.sub === sub && at - b.at < 20_000)) return null;
+  const gap = d.cooldown ? badgeCooldownSec() * 1000 : 20_000;
+  if (badges.some((b) => b.camera.toLowerCase() === camera.toLowerCase() && b.sub === sub && at - b.at < gap)) return null;
   const profiles = Array.isArray(d.profiles) && d.profiles.length ? d.profiles.map(Number).filter(Boolean) : null;
   const b = { id: `b${at}-${Math.random().toString(36).slice(2, 6)}`, at, camera, sub, profiles,
     icon: String(d.icon || '🚶').slice(0, 8), seconds: Math.min(30, Math.max(2, Number(d.seconds) || 5)),
@@ -1102,7 +1105,7 @@ function startHaListener() {
           announce(d.kind === 'doorbell' ? 'doorbell' : 'message', d.message, { title: d.title, pause: d.pause, speak: d.speak, profile: d.profile });
         } else if (e.variables?.trigger && camSubs.has(m.id)) {
           const c = camSubs.get(m.id);
-          if (inWindow(c)) addBadge(alertBadge(c));
+          if (inWindow(c)) addBadge({ ...alertBadge(c), cooldown: true });
         } else if (e.variables?.trigger && (doorbellSub === null || m.id === doorbellSub)) {
           announce('doorbell', '', { camera: doorbellCamera() });
         }
@@ -1140,13 +1143,14 @@ route('GET', '/api/admin/camera-alerts', 'admin', async () => {
         .sort((a, b) => a.name.localeCompare(b.name));
     } catch { /* not linked */ }
   }
-  return { alerts: cameraAlerts().map((a) => ({ ...a, picture: a.picture || 'auto', autoCamera: cameraFor(a.entity) })), sensors, cameras: await refreshCameraList(), profiles: db.prepare('SELECT id, name FROM profiles ORDER BY name').all(), linked: haLive.connected };
+  return { alerts: cameraAlerts().map((a) => ({ ...a, picture: a.picture || 'auto', autoCamera: cameraFor(a.entity) })), sensors, cameras: await refreshCameraList(), profiles: db.prepare('SELECT id, name FROM profiles ORDER BY name').all(), linked: haLive.connected, cooldownSec: badgeCooldownSec() };
 });
 route('PUT', '/api/admin/camera-alerts', 'admin', async (req, b) => {
   const alerts = (Array.isArray(b.alerts) ? b.alerts : []).slice(0, 30).map(cleanAlert).filter(Boolean);
   setSetting('camera_alerts', JSON.stringify(alerts));
+  if (b.cooldownSec !== undefined) setSetting('badge_cooldown', String(Math.max(20, Math.min(3600, Number(b.cooldownSec) || 120))));
   subscribeCameras();
-  return { ok: true, alerts };
+  return { ok: true, alerts, cooldownSec: badgeCooldownSec() };
 });
 route('GET', '/api/admin/job-alerts', 'admin', async () => ({ profiles: jobAlertProfiles() }));
 route('PUT', '/api/admin/job-alerts', 'admin', async (req, b) => {
@@ -2153,6 +2157,8 @@ route('POST', '/api/tv/logs', 'device', async (req, b, p, ctx) => {
   const entries = Array.isArray(b.entries) ? b.entries.slice(0, 500) : [];
   const meta = b.meta && typeof b.meta === 'object' ? b.meta : {};
   const ins = db.prepare('INSERT INTO device_logs (device_id, ts, level, tag, msg) VALUES (?,?,?,?,?)');
+  const seen = db.prepare('SELECT 1 FROM device_logs WHERE device_id = ? AND ts = ? AND tag = ? AND msg = ? LIMIT 1'); // apps re-send lines they couldn't confirm
+  let stored = 0;
   const t0 = now();
   db.exec('BEGIN');
   try {
@@ -2164,12 +2170,13 @@ route('POST', '/api/tv/logs', 'device', async (req, b, p, ctx) => {
       const level = ['D', 'I', 'W', 'E'].includes(e.l) ? e.l : 'I';
       const tag = String(e.g || 'app').slice(0, 24);
       const msg = String(e.m ?? '').slice(0, 1000);
-      ins.run(ctx.device.id, ts, level, tag, msg);
+      if (seen.get(ctx.device.id, ts, tag, msg)) continue; // already have it – don't store or echo it twice
+      ins.run(ctx.device.id, ts, level, tag, msg); stored++;
       console.log(`[app] ${ctx.device.name} ${new Date(ts).toISOString().slice(5, 19).replace('T', ' ')} ${level}/${tag}: ${msg}`);
     }
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
-  return { ok: true, stored: entries.length };
+  return { ok: true, stored };
 });
 route('GET', '/api/admin/logs', 'admin', async (req) => {
   const q = new URL(req.url, 'http://x').searchParams;
