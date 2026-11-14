@@ -249,7 +249,7 @@ function choreVisibleTo(id, c) {
   if (c.anyLevel && !e.who) return levelIds(c.anyLevel).includes(id);
   return !!c.everyone || !e.who || e.who === id || c.assignee === id;
 }
-const logVisibleTo = (id, l) => l.by === id || l.actor === id;
+const logVisibleTo = (id, l) => l.by === id || l.actor === id || l.claimFrom === id; // the job's owner sees a claim so they can answer it
 const seesAll = id => !!db.logins[id] && activeRoles(db.logins[id]).admin;
 function mayReceive(memberId, event) {
   if (event.coll === 'chores' || event.coll === 'log') {
@@ -982,6 +982,13 @@ async function sendTvTime(data) {
 }
 function askToCheck(id, l) {
   const who = db.members[l.by]?.name || 'Someone';
+  if (l.claimFrom) {
+    const owner = db.members[l.claimFrom]?.name || 'someone else';
+    haEvent('tivisync_approval', { id: `fp-${id}`, title: `🧹 Who did ${owner}'s job?`, message: `${who} says they did: ${l.title}`,
+      options: [{ label: `${who} did it`, value: 'yes' }, { label: `${owner} did it`, value: 'no' }] }).catch(e => console.error(`Couldn't ask who did the job: ${e.message}`));
+    if (db.logins[l.claimFrom]) notify(l.claimFrom, 'chores', { title: `${who} says they did your job`, body: `${l.title} – open Family Planner to say who really did it.`, url: '/#today', tag: `claim-${id}` });
+    return;
+  }
   haEvent('tivisync_approval', { id: `fp-${id}`, title: `✅ Check ${who}'s extra job`, message: `${l.title}${l.minutes ? ` – about ${l.minutes} min` : ''}`,
     options: [{ label: 'Approve', value: 'yes' }, { label: 'Reject', value: 'no' }] }).catch(e => console.error(`Couldn't ask for the extra job to be checked: ${e.message}`));
 }
@@ -989,6 +996,17 @@ function checkJob(id, yes, by) {
   const l = db.log[id];
   if (!l || !l.pending) return false;
   delete l.pending;
+  if (l.claimFrom) {
+    /* yes = the person who ticked it did it; no = it was the job's owner after all */
+    const claimer = l.by, owner = l.claimFrom;
+    if (!yes) l.by = owner;
+    l.checkedBy = by; l.claimResult = yes ? 'ticker' : 'owner';
+    creditTv(l, 1, 'chore');
+    save(); broadcast({ coll: 'log', id, doc: l });
+    const doer = db.members[l.by]?.name || 'Someone';
+    for (const m of new Set([claimer, owner])) if (db.logins[m]) notify(m, 'chores', { title: `${l.title}: ${doer} did it`, body: `Checked by ${by}.`, url: '/#today', tag: `claim-${id}` });
+    return true;
+  }
   if (yes) { l.checkedBy = by; creditTv(l, 1, 'extra job'); }
   else l.rejected = { by, note: 'Not approved', at: Date.now() };
   save(); broadcast({ coll: 'log', id, doc: l });
@@ -1009,7 +1027,7 @@ function startHaListener() {
       else if (m.type === 'auth_ok') ws.send(JSON.stringify({ id: ++n, type: 'subscribe_events', event_type: 'tivisync_approval_answer' }));
       else if (m.type === 'event' && m.event?.event_type === 'tivisync_approval_answer') {
         const d = m.event.data || {}, hit = /^fp-(.+)$/.exec(String(d.id || ''));
-        if (hit && checkJob(hit[1], d.value === 'yes', String(d.by || 'an adult').slice(0, 60))) console.log(`Extra job ${d.value === 'yes' ? 'approved' : 'rejected'} by ${d.by}`);
+        if (hit && checkJob(hit[1], d.value === 'yes', String(d.by || 'an adult').slice(0, 60))) console.log(`Job check (${d.value}) by ${d.by}`);
       }
     };
     ws.onclose = () => setTimeout(connect, 15000);
@@ -1324,7 +1342,7 @@ async function api(req, res, url) {
   }
   if (route[0] === 'state' && method === 'GET') { noteOpen(user.id); return send(res, 200, stateFor(user)); }
   if (route[0] === 'log' && ID_RE.test(route[1] || '') && route[2] === 'check' && method === 'POST') {
-    if (!user.admin) return fail(res, 403, ADMIN_ONLY);
+    if (!user.admin && !(db.log[route[1]]?.claimFrom === user.id)) return fail(res, 403, ADMIN_ONLY);
     const yes = !!(await readJson(req)).yes;
     if (!checkJob(route[1], yes, user.name)) return fail(res, 400, 'That has already been checked.');
     haEvent('tivisync_approval_cancel', { id: `fp-${route[1]}`, by: user.name }).catch(() => {});
@@ -1611,7 +1629,12 @@ async function api(req, res, url) {
       if (coll === 'chores' && !user.admin && db.chores[id]?.returned?.needPhoto && doc.returned === undefined && !Object.values(db.reviews).some(r => r.choreId === id)) return fail(res, 403, 'Take a picture of the finished job first.');
       if (coll === 'chores' && db.chores[id]?.returned?.photo && !db.chores[id].returned.needPhoto && doc.returned?.photo !== db.chores[id].returned.photo) removePhoto(db.chores[id].returned.photo);
       const newTick = coll === 'log' && !db.log[id] && !doc.rejected;
-      if (newTick && doc.extra && !user.admin) doc.pending = true; else if (coll === 'log') delete doc.pending;
+      /* "I did it" on someone else's job: the job's owner or an adult says who really did it before any TV time is given. */
+      if (coll === 'log' && newTick && !doc.extra && doc.claimFrom) {
+        if (!db.members[doc.claimFrom] || doc.claimFrom === doc.by || doc.by !== user.id) delete doc.claimFrom;
+      } else if (coll === 'log' && newTick) delete doc.claimFrom;
+      if (coll === 'log' && db.log[id]?.claimFrom && !newTick) doc.claimFrom = db.log[id].claimFrom;
+      if (newTick && (doc.extra || doc.claimFrom) && !user.admin) doc.pending = true; else if (coll === 'log') delete doc.pending;
       if (coll === 'log' && db.log[id]) { if (db.log[id].tvDay) doc.tvDay = db.log[id].tvDay; else delete doc.tvDay; }
       db[coll][id] = doc;
       /* A sent-back job redone with a picture earns its time back only when an adult accepts the picture. */
