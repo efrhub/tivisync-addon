@@ -284,11 +284,21 @@ const everyoneWaiting = (c, doneBy) => {
   const today = localToday(), required = (c.people || []).length ? c.people : everyoneIds;
   return required.filter(id => everyoneIds.includes(id) || (c.people || []).includes(id)).filter(id => S.members.has(id) && !doneBy.includes(id) && !awayOn(id, c.due < today ? today : c.due));
 };
-async function complete(id, proof, forWho) {
+/* Ticking a job that belongs to someone else (who can sign in): who actually did it? */
+function openWhoDid(c, owner) {
+  openSheet(`<form id="who-did" data-id="${esc(c.id)}"><h2 id="sheet-title">Who did ${esc(c.title)}?</h2>
+    <p class="hint">This is ${esc(memberName(owner))}'s job.${me.admin ? '' : ` If you did it, ${esc(memberName(owner))} or an adult will be asked to check before the TV time is added.`}</p>
+    <div class="actions"><button type="button" class="btn" data-a="close">Cancel</button>
+    <button type="button" class="btn" data-a="who-did" data-id="${esc(c.id)}" data-who="${esc(owner)}">${esc(memberName(owner))} did it</button>
+    <button type="button" class="btn primary" data-a="who-did" data-id="${esc(c.id)}" data-who="${esc(me.id)}">I did it</button></div></form>`);
+}
+async function complete(id, proof, forWho, doneBy) {
   const c = S.chores.get(id); if (!c) return;
+  const owner = !c.everyone && me && c.assignee && c.assignee !== me.id && S.members.has(c.assignee) && hasLogin(c.assignee) ? c.assignee : '';
+  if (owner && !proof && !doneBy) return openWhoDid(c, owner);
   if (c.returned && c.returned.needPhoto && !me.admin && !proof) return openProof(id);
   const today = localToday();
-  const entry = { id: 'l' + uid(), actor: me ? me.id : '', ...(proof ? { proof } : {}), choreId: c.id, title: c.title, roomId: c.roomId, by: creditFor(c), date: today, minutes: c.minutes || 0, stamp: Date.now(), prevDue: c.due, prevSched: c.sched || null, prevAssignee: c.assignee || '' };
+  const entry = { id: 'l' + uid(), actor: me ? me.id : '', ...(proof ? { proof } : {}), ...(owner && doneBy && doneBy !== owner ? { claimFrom: owner } : {}), choreId: c.id, title: c.title, roomId: c.roomId, by: doneBy || creditFor(c), date: today, minutes: c.minutes || 0, stamp: Date.now(), prevDue: c.due, prevSched: c.sched || null, prevAssignee: c.assignee || '' };
   entryEveryone: if (c.everyone) {
     entry.prevDoneBy = c.doneBy || [];
     let person = me.id;
@@ -317,7 +327,8 @@ async function complete(id, proof, forWho) {
   if (c.level) { const m = levels[c.level] || []; if (m.length) next.assignee = m[(m.indexOf(c.assignee) + 1) % m.length]; }
   else if (c.rotate && c.assignee) { const m = members(); const i = m.findIndex(x => x.id === c.assignee); if (m.length > 1 && i >= 0) next.assignee = m[(i + 1) % m.length].id; }
   if (proof) toast(`${c.title} sent to be checked.`);
-  else toast(due ? `${c.title} done. Next: ${fmtShort(due)}` : `${c.title} done.`, () => undoLog(entry.id));
+  else if (entry.claimFrom && !me.admin) toast(`${c.title} done. ${memberName(entry.claimFrom)} or an adult will check it was you.`, () => undoLog(entry.id));
+  else if (!(entry.claimFrom && !me.admin)) toast(due ? `${c.title} done. Next: ${fmtShort(due)}` : `${c.title} done.`, () => undoLog(entry.id));
   undoCopies.set(entry.id, next);
   await put('log', entry);
   await put('chores', next);
@@ -523,7 +534,7 @@ function viewToday() {
     ${group('', 'Next 7 days', 'tick early if you get ahead', soon)}
     ${!late.length && !now.length && !soon.length ? `<div class="empty">Nothing in this view.${next ? ` Next up: ${esc(next.title)} on ${esc(fmtShort(next.due))}.` : ''}</div>` : ''}
     ${me.cleaner ? '<div class="extra-job"><button class="btn" data-a="extra-open">Add a job I did</button></div>' : ''}
-    ${doneToday.length ? `<section class="group"><h2>Done today <small>${doneToday.length}</small></h2><ul class="rows">${doneToday.map(l => `<li class="row is-done"><span class="tick done" aria-hidden="true">${TICK}</span><span class="row-main" style="cursor:default"><span class="row-title">${esc(l.title)}${l.extra ? '<span class="flag">Extra job</span>' : ''}${l.pending ? '<span class="flag">Waiting for an adult to check</span>' : ''}</span><span class="row-meta">${l.roomId ? esc(roomName(l.roomId)) : ''}${l.roomId && memberName(l.by) ? ' · ' : ''}${esc(memberName(l.by))}${l.stamp ? `${l.roomId || memberName(l.by) ? ' · ' : ''}${esc(clockTime(l.stamp))}` : ''}${l.extra && l.minutes ? ` · about ${esc(fmtMins(l.minutes))}` : ''}</span></span>${me.admin && l.pending ? `<button class="btn small primary" data-a="job-check" data-id="${esc(l.id)}" data-yes="1">Approve</button><button class="btn small" data-a="job-check" data-id="${esc(l.id)}">Reject</button>` : ''}${me.admin && l.prevDue !== undefined && !l.proof && S.chores.has(l.choreId) ? `<button class="btn small" data-a="send-back" data-id="${esc(l.id)}" data-title="${esc(l.title)}">Not done properly</button>` : ''}${!l.proof && canTick() && (me.admin || (l.actor === me.id && (l.extra || S.chores.has(l.choreId) || undoCopies.has(l.id)))) ? `<button class="btn small" data-a="undo" data-id="${esc(l.id)}" aria-label="Undo ${esc(l.title)}">Undo</button>` : ''}</li>`).join('')}</ul></section>` : ''}
+    ${doneToday.length ? `<section class="group"><h2>Done today <small>${doneToday.length}</small></h2><ul class="rows">${doneToday.map(l => `<li class="row is-done"><span class="tick done" aria-hidden="true">${TICK}</span><span class="row-main" style="cursor:default"><span class="row-title">${esc(l.title)}${l.extra ? '<span class="flag">Extra job</span>' : ''}${l.pending ? `<span class="flag">${l.claimFrom ? `Says they did ${esc(memberName(l.claimFrom))}'s job – waiting for a check` : 'Waiting for an adult to check'}</span>` : ''}</span><span class="row-meta">${l.roomId ? esc(roomName(l.roomId)) : ''}${l.roomId && memberName(l.by) ? ' · ' : ''}${esc(memberName(l.by))}${l.stamp ? `${l.roomId || memberName(l.by) ? ' · ' : ''}${esc(clockTime(l.stamp))}` : ''}${l.extra && l.minutes ? ` · about ${esc(fmtMins(l.minutes))}` : ''}</span></span>${l.pending && l.claimFrom && (me.admin || me.id === l.claimFrom) ? `<button class="btn small primary" data-a="job-check" data-id="${esc(l.id)}" data-yes="1">${esc(memberName(l.by))} did it</button><button class="btn small" data-a="job-check" data-id="${esc(l.id)}">${esc(memberName(l.claimFrom))} did it</button>` : me.admin && l.pending ? `<button class="btn small primary" data-a="job-check" data-id="${esc(l.id)}" data-yes="1">Approve</button><button class="btn small" data-a="job-check" data-id="${esc(l.id)}">Reject</button>` : ''}${me.admin && l.prevDue !== undefined && !l.proof && S.chores.has(l.choreId) ? `<button class="btn small" data-a="send-back" data-id="${esc(l.id)}" data-title="${esc(l.title)}">Not done properly</button>` : ''}${!l.proof && canTick() && (me.admin || (l.actor === me.id && (l.extra || S.chores.has(l.choreId) || undoCopies.has(l.id)))) ? `<button class="btn small" data-a="undo" data-id="${esc(l.id)}" aria-label="Undo ${esc(l.title)}">Undo</button>` : ''}</li>`).join('')}</ul></section>` : ''}
   </div>${sideToday(today)}</div>`;
 }
 const outingOn = (o, date) => o.weekly ? date >= o.from && diffDays(date, o.from) % 7 === 0 : date >= o.from && date <= o.to;
@@ -1303,7 +1314,8 @@ document.addEventListener('click', e => {
   else if (a === 'remind-snooze') { call('POST', 'reminders/snooze', { which: id }).then(queueReminders).then(() => toast('Snoozed for 1 hour.')).catch(writeFailed); }
   else if (a === 'report-csv') downloadReport();
   else if (a === 'send-back') openSendBack(id, b.dataset.title);
-  else if (a === 'job-check') call('POST', `log/${id}/check`, { yes: !!b.dataset.yes }).then(() => toast(b.dataset.yes ? 'Approved.' : 'Rejected.')).catch(writeFailed);
+  else if (a === 'job-check') { const l = S.log.get(id); call('POST', `log/${id}/check`, { yes: !!b.dataset.yes }).then(() => toast(l && l.claimFrom ? `Thanks – ${memberName(b.dataset.yes ? l.by : l.claimFrom)} gets the credit.` : b.dataset.yes ? 'Approved.' : 'Rejected.')).catch(writeFailed); }
+  else if (a === 'who-did') { closeSheet(); complete(id, undefined, undefined, b.dataset.who); }
   else if (a === 'photo-view') openSheet(`<div><h2 id="sheet-title">Photo</h2><img class="chore-photo" src="api/photos/${encodeURIComponent(id)}" alt="Photo added when this chore was sent back"><div class="actions"><button type="button" class="btn" data-a="close">Close</button></div></div>`);
   else if (a === 'chat-del') { call('DELETE', `chat/${encodeURIComponent(id)}`).catch(writeFailed); }
   else if (a === 'shift-del-ask') { b.outerHTML = `<button type="button" class="btn danger" data-a="shift-del" data-id="${esc(id)}">Yes, delete it</button>`; }
