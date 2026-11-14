@@ -496,15 +496,36 @@ async function loadChannels(reload) {
     <p class="muted">Tick the channels each profile can see. Channels that come in several qualities (SD / HD / FHD / 4K) are merged into one – on the TV you pick the channel, then the quality.</p>
     <div class="row">${srcs.length > 1 ? `<select id="chs" style="flex:1">${srcs.map((x) => `<option value="${x.id}" ${x.id === st.sourceId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>` : ''}
       <select id="chp" style="flex:1">${profs.map((x) => `<option value="${x.id}" ${x.id === st.profileId ? 'selected' : ''}>👤 ${esc(x.name)}</option>`).join('')}</select>
-      <button class="small" id="chreload">↻ Reload list</button><button class="small" id="chfv">📺 Freeview channels</button><button class="small" id="chgn">✏️ Rename groups</button></div>
+      <button class="small" id="chreload">↻ Reload list</button><button class="small" id="chfv">📺 Freeview channels</button><button class="small" id="chgn">✏️ Rename groups</button><button class="small" id="chepg">🗓 TV guide</button></div>
     <div id="chinfo" class="muted" style="margin-top:8px">Loading channels from your provider…</div></div><div id="chbody"></div>`;
   $('#chp').onchange = () => { st.profileId = Number($('#chp').value); loadChannels(); };
   if ($('#chs')) $('#chs').onchange = () => { st.sourceId = Number($('#chs').value); st.cat = ''; st.sel.clear(); loadChannels(); };
   $('#chfv').onclick = () => loadFreeview(st.sourceId);
   $('#chgn').onclick = () => loadGroupNames(st.sourceId);
+  $('#chepg').onclick = () => loadGuideStatus();
   $('#chreload').onclick = async () => { $('#chinfo').textContent = 'Reloading from your provider…'; try { await api('POST', '/api/admin/channels/reload', { sourceId: st.sourceId }); } catch (e) { toast(e.message); } loadChannels(); };
   try { st.data = await api('GET', `/api/admin/channels?sourceId=${st.sourceId}&profileId=${st.profileId}`); } catch (e) { $('#chinfo').textContent = e.message; return; }
   renderChannels();
+}
+
+// 🗓 the TV guide and channel icons are downloaded once a day and kept on Home Assistant
+async function loadGuideStatus() {
+  $('#chbody').innerHTML = '<div class="card muted">Loading…</div>';
+  let d; try { d = await api('GET', '/api/admin/epg'); } catch (e) { $('#chbody').innerHTML = `<div class="card">${esc(e.message)}</div>`; return; }
+  const when = (t) => t ? `${new Date(t).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} (${ago(t)})` : 'never';
+  $('#chbody').innerHTML = `<div class="card"><h3>🗓 TV guide &amp; channel icons</h3>
+    <p class="muted">Every ${esc(d.every)} the add-on downloads the full TV guide for the next 8 days and the latest channel icons. The TVs read the guide from Home Assistant, so it opens quickly; channels that aren't in it are still asked from the provider. Catch-up channels keep a week of past programmes.</p>
+    ${d.sources.map((s) => { const l = s.last || {}; return `<div style="margin:10px 0;padding:10px;border:1px solid #333;border-radius:8px"><b>${esc(s.name)}</b> <span class="muted">– from ${esc(s.from || 'nowhere (no guide address)')}</span><br>
+      Last updated: <b>${when(l.lastOkAt)}</b>${l.ok === false && l.error ? `<br>⚠️ Last try ${when(l.at)} failed: ${esc(l.error)}` : ''}<br>
+      <span class="muted">${s.stored.channels} channels · ${s.stored.programmes.toLocaleString()} programmes${s.stored.until ? ` · up to ${new Date(s.stored.until).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}` : ''}${l.icons ? ` · ${l.icons} icons` : ''}${l.keptIds != null && l.visibleChannels > l.keptIds ? ` · kept ${l.keptIds} of ${l.visibleChannels} (hide more channels to keep them all)` : ''}${l.ms ? ` · took ${Math.round(l.ms / 1000)} s` : ''}</span></div>`; }).join('')}
+    <p class="muted">🖼 Spare logo list: ${d.logos.count} logos, updated ${when(d.logos.at)}.</p>
+    <div class="row"><button class="small primary" id="epgnow" ${d.running ? 'disabled' : ''}>${d.running ? 'Updating…' : '↻ Update now'}</button><button class="small" id="epgback">Back to channels</button></div></div>`;
+  $('#epgback').onclick = () => renderChannels();
+  $('#epgnow').onclick = async () => {
+    $('#epgnow').disabled = true; $('#epgnow').textContent = 'Updating… (can take a few minutes)';
+    try { const r = await api('POST', '/api/admin/epg/refresh', {}); const bad = r.results.filter((x) => !x.ok); toast(bad.length ? `⚠️ ${bad.map((x) => x.error).join(', ')}` : 'TV guide and icons updated'); } catch (e) { toast(e.message); }
+    loadGuideStatus();
+  };
 }
 
 // ✏️ rename the provider's channel groups (live categories) – the TVs show your names in Live TV and the Guide

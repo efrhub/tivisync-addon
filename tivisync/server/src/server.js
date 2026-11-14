@@ -469,6 +469,7 @@ route('PUT', '/api/admin/sources/:id', 'admin', async (req, b, { id }) => {
 });
 route('DELETE', '/api/admin/sources/:id', 'admin', async (req, b, { id }) => {
   db.prepare('DELETE FROM sources WHERE id = ?').run(id);
+  try { epg.forget(Number(id)); } catch { /* guide store not open */ }
   for (const f of fs.readdirSync(FILES_DIR)) if (f.startsWith(`source-${Number(id)}-`)) fs.rmSync(path.join(FILES_DIR, f), { force: true });
   return { ok: true };
 });
@@ -1950,7 +1951,13 @@ async function nightlyRatings() { await syncLibraries(true).catch(() => {}); awa
 function scheduleNightly() {
   const next = new Date(); next.setHours(3, 0, 0, 0);
   if (next <= new Date()) next.setDate(next.getDate() + 1);
-  setTimeout(async () => { await refreshAllChannels('nightly').catch((e) => console.warn('nightly channel refresh failed', e.message)); await nightlyRatings(); scheduleNightly(); }, next - Date.now()).unref();
+  setTimeout(async () => {
+    await refreshAllChannels('nightly').catch((e) => console.warn('nightly channel refresh failed', e.message));
+    // every 24 hours: new channel icons + the TV guide for the next 8 days
+    if (!process.env.NO_LOGOS) await loadLogoIndex(true).catch((e) => console.warn('nightly logo refresh failed', e.message));
+    if (!process.env.NO_EPG) await refreshGuides('nightly').catch((e) => console.warn('nightly guide refresh failed', e.message));
+    await nightlyRatings(); scheduleNightly();
+  }, next - Date.now()).unref();
 }
 // ---------- weekly check-up: a phone notification every Sunday at 18:00 ----------
 // TVs that haven't updated or been seen, VPN drops, and whether chore time is reaching TiviSync.
@@ -2194,11 +2201,12 @@ function cleanChannelName(name) {
   n = n.replace(/\b(bbc|itv|channel)\s*([1-4])\b/i, (m, a, d) => a.toLowerCase() === 'bbc' ? `${a} ${['one', 'two', 'three', 'four'][d - 1]}` : `${a} ${d}`);
   return n;
 }
-async function loadLogoIndex() {
-  if (logoIndex.map && now() - logoIndex.at < 7 * 86400_000) return logoIndex.map;
+const LOGO_TTL = 86400_000; // rebuilt every 24 hours (and by the nightly job)
+async function loadLogoIndex(force = false) {
+  if (!force && logoIndex.map && now() - logoIndex.at < LOGO_TTL) return logoIndex.map;
   if (logoIndex.loading) return logoIndex.loading;
   logoIndex.loading = (async () => {
-    try { const c = JSON.parse(getSetting('logo_index') || 'null'); if (c && now() - c.at < 7 * 86400_000) { logoIndex.map = c.map; logoIndex.at = c.at; return c.map; } } catch { /* rebuild */ }
+    if (!force) try { const c = JSON.parse(getSetting('logo_index') || 'null'); if (c && now() - c.at < LOGO_TTL) { logoIndex.map = c.map; logoIndex.at = c.at; return c.map; } } catch { /* rebuild */ }
     const map = {};
     for (const dir of LOGO_DIRS) {
       try {
@@ -2223,15 +2231,122 @@ function logoFor(name, map) {
   if (!k) return null;
   return map[k] || map[k.replace(/(hd|uhd)$/, '')] || map[compactName(clean.replace(/\b(tv|channel)\b/gi, ''))] || null;
 }
-// logos for channels the provider sends without one (ref -> url); the logo collection loads in the background the first time
-async function missingLogos(list) {
+// logos for channels the provider sends without one (ref -> url): first the icon from the daily TV guide,
+// then the tv-logos collection (loads in the background the first time)
+async function missingLogos(list, sourceId) {
   const missing = list.channels.filter((ch) => !ch.logo);
-  if (!missing.length || process.env.NO_LOGOS) return {};
-  const map = logoIndex.map || (await Promise.race([loadLogoIndex(), new Promise((r) => setTimeout(() => r(null), 3000))]));
+  if (!missing.length) return {};
   const out = {};
-  if (map) for (const ch of missing) { const u = logoFor(ch.name, map); if (u) out[ch.ref] = u; }
+  const guideIcons = sourceId != null ? epg.icons(sourceId) : {};
+  for (const ch of missing) { const u = ch.epgId && guideIcons[String(ch.epgId).toLowerCase()]; if (u) out[ch.ref] = u; }
+  if (process.env.NO_LOGOS) return out;
+  const map = logoIndex.map || (await Promise.race([loadLogoIndex(), new Promise((r) => setTimeout(() => r(null), 3000))]));
+  if (map) for (const ch of missing) { if (out[ch.ref]) continue; const u = logoFor(ch.name, map); if (u) out[ch.ref] = u; }
   return out;
 }
+
+// ---------- 🗓 TV guide (EPG), downloaded once a day and kept on Home Assistant ----------
+const epg = require('./epg');
+epg.open(DATA_DIR);
+const EPG_EVERY = 24 * 3600_000;
+const epgRun = { running: null };
+// where a source's full guide comes from: its own EPG address / uploaded file, or the Xtream provider's xmltv.php
+function guideLocation(src) {
+  if (src.epg_url) {
+    if (src.epg_url.startsWith(HOSTED)) { const f = path.join(FILES_DIR, src.epg_url.slice(HOSTED.length)); return fs.existsSync(f) ? { file: f } : null; }
+    return { url: src.epg_url };
+  }
+  if (src.type === 'xtream' && src.url) {
+    const base = String(src.url).replace(/\/+$/, '');
+    return { url: `${base}/xmltv.php?username=${encodeURIComponent(src.username || '')}&password=${encodeURIComponent(src.password || '')}` };
+  }
+  return null;
+}
+// the guide ids worth keeping: channels at least one profile can see (UK / Freeview / catch-up first if there are too many)
+const GUIDE_FIRST = /\b(uk|gb|united kingdom|england|scotland|wales|ireland|irish|freeview|fta|sky|bbc|itv|channel 4|bt sport|tnt|virgin|local)\b/i;
+function guideWanted(src, list) {
+  const profiles = db.prepare('SELECT id FROM profiles').all().map((r) => r.id);
+  const hidden = profiles.map((pid) => hiddenRefs(pid, src.id));
+  const fv = new Set(freeviewCatIds(src.id, list.categories).map(String));
+  const catName = Object.fromEntries(list.categories.map((c) => [String(c.id), c.name]));
+  const scored = [];
+  for (const ch of list.channels) {
+    if (!ch.epgId) continue;
+    if (profiles.length && hidden.every((h) => h.has(ch.ref))) continue;
+    const id = String(ch.epgId).toLowerCase();
+    const cat = String(ch.categoryId);
+    const score = (fv.has(cat) ? 4 : 0) + (ch.archive ? 2 : 0) + (GUIDE_FIRST.test(catName[cat] || '') || GUIDE_FIRST.test(ch.name) ? 1 : 0);
+    scored.push({ id, score, archive: !!ch.archive, num: ch.num || 0 });
+  }
+  scored.sort((a, b) => b.score - a.score || a.num - b.num);
+  const wanted = new Map();
+  for (const x of scored) {
+    const w = wanted.get(x.id);
+    if (w) { if (x.archive) w.archive = true; continue; }
+    if (wanted.size >= epg.MAX_CHANNELS) continue;
+    wanted.set(x.id, { archive: x.archive });
+  }
+  return { wanted, total: new Set(scored.map((x) => x.id)).size };
+}
+async function refreshGuides(reason = 'daily', only = null) {
+  if (epgRun.running) return epgRun.running;
+  epgRun.running = (async () => {
+    const out = [];
+    for (const src of db.prepare('SELECT * FROM sources ORDER BY id').all()) {
+      if (only != null && src.id !== Number(only)) continue;
+      const where = guideLocation(src);
+      if (!where) { out.push({ sourceId: src.id, ok: false, error: 'no guide address for this source' }); continue; }
+      const list = await chan.channelsFor(src, { filesDir: FILES_DIR, hosted: HOSTED }).catch(() => ({ channels: [], categories: [] }));
+      const { wanted, total } = guideWanted(src, list);
+      // M3U lists often have no tvg-id: then keep the whole guide
+      const st = await epg.refreshSource(src.id, where, list.channels.length && total ? wanted : null).catch((e) => ({ sourceId: src.id, ok: false, error: e.message }));
+      st.reason = reason; st.visibleChannels = total; st.keptIds = wanted.size;
+      out.push(st);
+    }
+    setSetting('epg_last_run', JSON.stringify({ at: now(), reason }));
+    return out;
+  })().finally(() => { epgRun.running = null; });
+  return epgRun.running;
+}
+// catch up when a nightly run was missed (add-on restarted, Home Assistant asleep…): checked every hour
+function guidesDue() {
+  return db.prepare('SELECT id FROM sources').all().some((s) => now() - epg.lastOk(s.id) > EPG_EVERY + 2 * 3600_000);
+}
+if (!process.env.NO_EPG) {
+  setTimeout(() => { if (guidesDue()) refreshGuides('startup').catch((e) => console.warn('guide refresh failed', e.message)); }, 90_000).unref();
+  setInterval(() => { if (guidesDue()) refreshGuides('catch-up').catch((e) => console.warn('guide refresh failed', e.message)); }, 3600_000).unref();
+}
+
+// the TVs: programmes for one or more guide ids. known=false means "not kept here – ask the provider".
+route('GET', '/api/tv/epg', 'device', async (req) => {
+  const q = new URL(req.url, 'http://x').searchParams;
+  const sourceId = Number(q.get('sourceId'));
+  const ids = String(q.get('ids') || q.get('id') || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean).slice(0, 200);
+  const from = Number(q.get('from')) * 1000 || now() - 8 * 86400_000, to = Number(q.get('to')) * 1000 || now() + 9 * 86400_000;
+  const st = epg.status(sourceId);
+  const channels = {};
+  for (const id of ids) channels[id] = epg.known(sourceId, id) ? { known: true, p: epg.forChannel(sourceId, id, from, to) } : { known: false };
+  return { at: st?.lastOkAt || null, hasGuide: epg.hasGuide(sourceId), channels };
+});
+// guide search on the server: { sourceId, q, ids?: [guide ids] } -> [[id, startSec, stopSec, title], …]
+route('POST', '/api/tv/epg/search', 'device', async (req, b) => {
+  const sourceId = Number(b.sourceId), q = String(b.q || '').trim();
+  if (!epg.hasGuide(sourceId)) return { hasGuide: false, results: [] };
+  if (q.length < 2) return { hasGuide: true, results: [] };
+  const ids = Array.isArray(b.ids) && b.ids.length ? new Set(b.ids.map((x) => String(x).toLowerCase())) : null;
+  return { hasGuide: true, results: epg.search(sourceId, q, ids) };
+});
+// parent panel: when each guide was last downloaded, how big it is, and a button to do it now
+route('GET', '/api/admin/epg', 'admin', async () => ({
+  running: !!epgRun.running, every: '24 hours (nightly at 3am, or within the hour if that was missed)',
+  logos: { count: logoIndex.map ? Object.keys(logoIndex.map).length : 0, at: logoIndex.at || null },
+  sources: db.prepare('SELECT * FROM sources ORDER BY id').all().map((s) => ({ id: s.id, name: s.name, from: guideLocation(s) ? (guideLocation(s).file ? 'uploaded file' : s.epg_url ? 'your EPG address' : 'provider (xmltv.php)') : null,
+    last: epg.status(s.id), stored: epg.counts(s.id) })),
+}));
+route('POST', '/api/admin/epg/refresh', 'admin', async (req, b) => {
+  const [results] = await Promise.all([refreshGuides('manual', b?.sourceId ?? null), loadLogoIndex(true).catch(() => null)]);
+  return { results, logos: logoIndex.map ? Object.keys(logoIndex.map).length : 0 };
+});
 setTimeout(() => { if (!process.env.NO_LOGOS) loadLogoIndex().catch(() => {}); }, 60_000).unref();
 
 // what the TV app needs: channels hidden for this profile + merged channels with their qualities
@@ -2252,7 +2367,8 @@ route('GET', '/api/tv/channels/layout', 'profile', async (req, b, p, { profile }
     const cats = new Set(freeviewCategories), hid = new Set(hidden);
     freeview = list.channels.filter((ch) => cats.has(String(ch.categoryId)) && !hid.has(ch.ref)).map((ch) => ch.ref);
   }
-  return { hidden, groups, freeview, freeviewCategories, logos: await missingLogos(list), groupNames: groupNames(src.id) };
+  return { hidden, groups, freeview, freeviewCategories, logos: await missingLogos(list, src.id), groupNames: groupNames(src.id),
+    guideAt: epg.status(src.id)?.lastOkAt || null };
 });
 
 // --- move playback to another TV ("handoff") ---
