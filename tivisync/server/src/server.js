@@ -1799,6 +1799,37 @@ route('GET', '/api/tv/title', 'profile', async (req) => {
   return { age: r.age, label: ratings.AGE_LABEL(r.age), cert: r.cert, country: r.country, score: r.score || null, votes: r.votes || null, tmdbId: r.tmdb_id, trailer };
 });
 
+// ------------------------------------------------------------------ 👤 actors: other titles in this library with someone from a film's cast
+const personCache = new Map(); // "tom hanks" -> { at, person, credits: [{kind, id}] }
+route('GET', '/api/tv/person', 'profile', async (req) => {
+  const q = new URL(req.url, 'http://x').searchParams;
+  const sourceId = Number(q.get('sourceId'));
+  const name = String(q.get('name') || '').trim().slice(0, 80);
+  if (!name) throw new HttpError(400, 'name required');
+  if (!TMDB_KEY()) return { name, person: null, titles: [] };
+  const ck = name.toLowerCase();
+  let p = personCache.get(ck);
+  if (!p || Date.now() - p.at > 7 * 86400_000) {
+    const found = await tmdb('/search/person', { query: name, include_adult: 'false', language: 'en-GB' });
+    const exact = (found.results || []).filter((x) => String(x.name || '').toLowerCase() === ck);
+    const hit = (exact.length ? exact : found.results || []).sort((a, b) => (b.popularity || 0) - (a.popularity || 0))[0];
+    let credits = [];
+    if (hit) {
+      const c = await tmdb(`/person/${hit.id}/combined_credits`, { language: 'en-GB' });
+      credits = (c.cast || []).map((x) => ({ kind: x.media_type === 'tv' ? 'series' : 'movie', id: x.id }));
+    }
+    p = { at: Date.now(), person: hit ? { id: hit.id, name: hit.name, photo: hit.profile_path ? TMDB_IMG + hit.profile_path : null } : null, credits };
+    personCache.set(ck, p);
+    if (personCache.size > 500) personCache.delete(personCache.keys().next().value);
+  }
+  const want = new Set(p.credits.map((c) => c.kind + ':' + c.id));
+  const titles = db.prepare('SELECT kind, ref, name, year, tmdb_id FROM title_ratings WHERE source_id = ? AND tmdb_id IS NOT NULL').all(sourceId)
+    .filter((r) => want.has(r.kind + ':' + r.tmdb_id))
+    .sort((a, b) => (b.year || 0) - (a.year || 0))
+    .map((r) => ({ kind: r.kind, ref: r.ref, name: r.name, year: r.year }));
+  return { name, person: p.person, titles };
+});
+
 // ------------------------------------------------------------------ trailers (YouTube, via TMDB)
 const trailerCache = new Map(); // "movie:123" -> { at, v: {key,name,site} | null }
 /** Best YouTube trailer for a TMDB title: official English trailer first, then any trailer, then a teaser. */
