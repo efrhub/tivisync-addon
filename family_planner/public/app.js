@@ -365,6 +365,7 @@ function scheduleNav(page) {
 const tabName = () => { const h = location.hash.slice(1); if (h === 'system' && !showSystem()) return 'today'; if (h === 'logs' && !(me && me.admin)) return 'today'; return ['today', 'week', 'rooms', 'progress', 'school', 'dinner', 'fun', 'extra', 'chat', 'shop', 'logs', 'system'].includes(h) ? h : 'today'; };
 const TICK = '<svg viewBox="0 0 24 24" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 13l4 4L19 7"/></svg>';
 
+let lastTab = null;
 function render() {
   const active = document.activeElement;
   /* Keep what someone is typing, and still show new messages as they arrive. */
@@ -395,8 +396,12 @@ function render() {
   if (!ready && empty) { main.innerHTML = `<div class="empty">${slowNote ? "Can't reach the server. Your planner will appear as soon as the connection returns." : 'Loading your planner…'}</div>`; return; }
   const choreTab = ['today', 'week', 'rooms'].includes(tab);
   if (choreTab && empty) { main.innerHTML = me.admin ? setupHTML(true) : `<div class="empty">Your household admin hasn't set up the planner yet.</div>`; return; }
+  /* Redraw without moving the page: ticking a job moves it to another list, and focusing its new spot used to jump the screen down. */
+  const keepY = window.scrollY;
   main.innerHTML = banners() + ({ today: viewToday, week: viewWeek, rooms: viewRooms, progress: viewProgress, school: viewSchool, dinner: viewDinner, fun: viewFun, extra: viewExtra, chat: viewChat, shop: viewShop, logs: viewLogs, system: viewSystem }[tab])();
-  if (focusKey) main.querySelector(`[data-fk="${CSS.escape(focusKey)}"]`)?.focus();
+  if (focusKey) main.querySelector(`[data-fk="${CSS.escape(focusKey)}"]`)?.focus({ preventScroll: true });
+  if (tab === lastTab && Math.abs(window.scrollY - keepY) > 1) window.scrollTo(0, keepY);
+  lastTab = tab;
 }
 function banners() {
   let h = '';
