@@ -2073,6 +2073,59 @@ route('PUT', '/api/admin/group-names', 'admin', async (req, b) => {
   return { sourceId: src.id, renamed: Object.keys(names).length };
 });
 
+// 🩺 health check of each IPTV source (run from the parent panel / by Claude): account, speed of the provider's
+// film / series / live lists, and how many films come with details. Only the provider's API is used – no streams are opened.
+route('GET', '/api/admin/diagnose', 'admin', async () => {
+  const out = { at: new Date().toISOString(), sources: [] };
+  for (const src of db.prepare('SELECT * FROM sources ORDER BY id').all()) {
+    const r = { id: src.id, name: src.name, type: src.type, servers: [] };
+    out.sources.push(r);
+    if (src.type !== 'xtream') continue;
+    const u = encodeURIComponent(src.username || ''), p = encodeURIComponent(src.password || '');
+    let backups = []; try { backups = src.backup_urls ? JSON.parse(src.backup_urls) : []; } catch { /* none */ }
+    for (const base of [src.url, ...backups].filter(Boolean).map((x) => String(x).replace(/\/+$/, ''))) {
+      let host = base; try { host = new URL(base).host; } catch { /* keep */ }
+      const api = (a, extra = '') => `${base}/player_api.php?username=${u}&password=${p}&action=${a}${extra}`;
+      const t = async (label, url, ms = 60_000) => {
+        const t0 = Date.now();
+        try {
+          const res = await fetch(url, { headers: { 'User-Agent': 'TiviSync/1.0' }, signal: AbortSignal.timeout(ms) });
+          const txt = await res.text(); let json = null; try { json = JSON.parse(txt); } catch { /* not json */ }
+          return { label, ok: res.ok, status: res.status, ms: Date.now() - t0, kb: Math.round(txt.length / 1024), json };
+        } catch (e) { return { label, ok: false, ms: Date.now() - t0, error: e.message }; }
+      };
+      const plain = ({ json, ...rest }) => rest;
+      const count = (c) => ({ ...plain(c), count: Array.isArray(c.json) ? c.json.length : null });
+      const s = { host, checks: [] };
+      r.servers.push(s);
+      const acc = await t('account', `${base}/player_api.php?username=${u}&password=${p}`);
+      const ui = acc.json?.user_info;
+      if (ui) s.account = { status: ui.status, expires: ui.exp_date ? new Date(Number(ui.exp_date) * 1000).toISOString().slice(0, 10) : null,
+        connectionsInUse: ui.active_cons, maxConnections: ui.max_connections, formats: ui.allowed_output_formats };
+      s.checks.push(plain(acc));
+      const vc = await t('film groups', api('get_vod_categories'));
+      s.checks.push(count(vc));
+      const films = [];
+      for (const c of (Array.isArray(vc.json) ? vc.json.slice(0, 3) : [])) {
+        const fl = await t(`films in "${c.category_name}"`, api('get_vod_streams', `&category_id=${encodeURIComponent(c.category_id)}`));
+        s.checks.push(count(fl));
+        if (Array.isArray(fl.json)) films.push(...fl.json.slice(0, 4));
+      }
+      let withPlot = 0, failed = 0, slowest = 0;
+      for (const f of films.slice(0, 8)) {
+        const d = await t('film details', api('get_vod_info', `&vod_id=${encodeURIComponent(f.stream_id)}`), 30_000);
+        slowest = Math.max(slowest, d.ms);
+        if (!d.ok || !d.json) failed++; else if (d.json.info && (d.json.info.plot || d.json.info.description)) withPlot++;
+      }
+      s.checks.push({ label: 'film details (sample)', checked: Math.min(films.length, 8), withPlot, failed, slowestMs: slowest,
+        containers: [...new Set(films.map((f) => f.container_extension).filter(Boolean))] });
+      s.checks.push(count(await t('series groups', api('get_series_categories'))));
+      s.checks.push(count(await t('live groups', api('get_live_categories'))));
+    }
+  }
+  return out;
+});
+
 route('GET', '/api/admin/freeview', 'admin', async (req) => {
   const src = sourceById(new URL(req.url, 'http://x').searchParams.get('sourceId'));
   const list = await chan.channelsFor(src, { filesDir: FILES_DIR, hosted: HOSTED });
