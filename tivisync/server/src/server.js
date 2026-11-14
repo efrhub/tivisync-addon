@@ -2152,6 +2152,14 @@ route('GET', '/api/admin/diagnose', 'admin', async () => {
         containers: [...new Set(films.map((f) => f.container_extension).filter(Boolean))] });
       s.checks.push(count(await t('series groups', api('get_series_categories'))));
       s.checks.push(count(await t('live groups', api('get_live_categories'))));
+      // catch-up ("start from the beginning"): channels the provider keeps recordings for
+      const ls = await t('live channels', api('get_live_streams'), 120_000);
+      if (Array.isArray(ls.json)) {
+        const arch = ls.json.filter((c) => Number(c.tv_archive) === 1);
+        const days = arch.map((c) => Number(c.tv_archive_duration) || 0);
+        s.checks.push({ label: 'catch-up', channels: ls.json.length, withCatchUp: arch.length,
+          maxDays: days.length ? Math.max(...days) : 0, examples: arch.slice(0, 8).map((c) => `${c.name} (${c.tv_archive_duration}d)`) });
+      } else s.checks.push(plain(ls));
     }
   }
   return out;
