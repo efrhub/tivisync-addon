@@ -1309,6 +1309,30 @@ async function weather(states) {
   } catch (e) { console.warn(`Weather: ${e.message}`); if (!weatherCache.data) return null; }
   return weatherCache.data;
 }
+// street / town for a GPS position (OpenStreetMap Nominatim – free, max 1 lookup a second, cached ~250 m for a day)
+const placeCache = new Map();
+let placeLast = 0;
+async function placeName(lat, lon, acc) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || process.env.NO_GEOCODE) return null;
+  const rough = Number(acc) > 500; // poor fix: town only
+  const key = `${lat.toFixed(rough ? 2 : 3)},${lon.toFixed(rough ? 2 : 3)}`;
+  const hit = placeCache.get(key);
+  if (hit && now() - hit.at < 86400_000) return hit.name;
+  const wait = placeLast + 1100 - now(); if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  placeLast = now();
+  try {
+    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=17&addressdetails=1&accept-language=en-GB`,
+      { headers: { 'User-Agent': 'TiviSync home dashboard (Home Assistant add-on)' }, signal: AbortSignal.timeout(4000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const a = (await r.json()).address || {};
+    const town = a.town || a.city || a.village || a.suburb || a.hamlet || a.county || '';
+    const road = rough ? '' : (a.road || a.pedestrian || a.neighbourhood || a.suburb || '');
+    const name = [road, town].filter((v, i, x) => v && x.indexOf(v) === i).join(', ') || null;
+    placeCache.set(key, { at: now(), name });
+    if (placeCache.size > 500) placeCache.delete(placeCache.keys().next().value);
+    return name;
+  } catch (e) { console.warn(`Place lookup: ${e.message}`); return null; }
+}
 const dashCache = { at: 0, data: null };
 // 📋 Today cameras: which cameras show on the Today tab, and for whom. { [entity]: { hidden, profiles: [ids] } } – no profiles ticked = everyone
 function todayCameraSettings() { try { return JSON.parse(getSetting('today_cameras') || '{}') || {}; } catch { return {}; } }
@@ -1341,13 +1365,23 @@ async function dashboardData() {
   } catch { /* Family Planner not reachable – just home / out */ }
   const fpFor = (first) => whereabouts.find((w) => String(w.name || '').trim().split(' ')[0].toLowerCase() === first.toLowerCase());
   const dayName = (d) => new Date(d + 'T12:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'UTC' });
-  const people = states.filter((s) => s.entity_id.startsWith('person.')).map((s) => {
+  const people = [];
+  for (const s of states.filter((x) => x.entity_id.startsWith('person.'))) {
     const first = name(s).split(' ')[0], home = s.state === 'home';
     let where = home ? 'Home' : s.state === 'not_home' ? 'Out' : s.state === 'unknown' || s.state === 'unavailable' ? '?' : s.state.replace(/_/g, ' ');
     const w = !home && fpFor(first);
     if (w) where = w.until ? `${w.label} · till ${w.until}` : `${w.label} · back ${w.back === today(now() + 86400_000) ? 'tomorrow' : dayName(w.back)}${w.backTime ? ' ' + w.backTime : ''}`;
-    return { name: first, home, where };
-  });
+    else if (s.state === 'not_home') {
+      // not in any zone: show roughly where they last were, e.g. "Near Cranes Farm Road, Basildon · 20 min ago"
+      const place = await placeName(s.attributes?.latitude, s.attributes?.longitude, s.attributes?.gps_accuracy);
+      if (place) {
+        const mins = Math.round((now() - Date.parse(s.last_updated || s.last_changed || 0)) / 60000);
+        const ago = !Number.isFinite(mins) || mins < 15 ? '' : mins < 90 ? ` · ${mins} min ago` : mins < 36 * 60 ? ` · ${Math.round(mins / 60)}h ago` : ' · a while ago';
+        where = `Near ${place}${ago}`;
+      }
+    }
+    people.push({ name: first, home, where });
+  }
   const open = states.filter((s) => s.entity_id.startsWith('binary_sensor.') && s.state === 'on' && ['door', 'window', 'opening', 'garage_door'].includes(s.attributes?.device_class))
     .map((s) => name(s).replace(/\s*(opening|contact|sensor)$/i, '')).filter((v, i, a) => a.indexOf(v) === i).slice(0, 12);
   const cams = states.filter((s) => s.entity_id.startsWith('camera.') && s.state !== 'unavailable').map((s) => ({ entity: s.entity_id, name: name(s).replace(/\s*fluent$/i, '') })).slice(0, 8);
