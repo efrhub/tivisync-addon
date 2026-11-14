@@ -496,14 +496,35 @@ async function loadChannels(reload) {
     <p class="muted">Tick the channels each profile can see. Channels that come in several qualities (SD / HD / FHD / 4K) are merged into one – on the TV you pick the channel, then the quality.</p>
     <div class="row">${srcs.length > 1 ? `<select id="chs" style="flex:1">${srcs.map((x) => `<option value="${x.id}" ${x.id === st.sourceId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>` : ''}
       <select id="chp" style="flex:1">${profs.map((x) => `<option value="${x.id}" ${x.id === st.profileId ? 'selected' : ''}>👤 ${esc(x.name)}</option>`).join('')}</select>
-      <button class="small" id="chreload">↻ Reload list</button><button class="small" id="chfv">📺 Freeview channels</button></div>
+      <button class="small" id="chreload">↻ Reload list</button><button class="small" id="chfv">📺 Freeview channels</button><button class="small" id="chgn">✏️ Rename groups</button></div>
     <div id="chinfo" class="muted" style="margin-top:8px">Loading channels from your provider…</div></div><div id="chbody"></div>`;
   $('#chp').onchange = () => { st.profileId = Number($('#chp').value); loadChannels(); };
   if ($('#chs')) $('#chs').onchange = () => { st.sourceId = Number($('#chs').value); st.cat = ''; st.sel.clear(); loadChannels(); };
   $('#chfv').onclick = () => loadFreeview(st.sourceId);
+  $('#chgn').onclick = () => loadGroupNames(st.sourceId);
   $('#chreload').onclick = async () => { $('#chinfo').textContent = 'Reloading from your provider…'; try { await api('POST', '/api/admin/channels/reload', { sourceId: st.sourceId }); } catch (e) { toast(e.message); } loadChannels(); };
   try { st.data = await api('GET', `/api/admin/channels?sourceId=${st.sourceId}&profileId=${st.profileId}`); } catch (e) { $('#chinfo').textContent = e.message; return; }
   renderChannels();
+}
+
+// ✏️ rename the provider's channel groups (live categories) – the TVs show your names in Live TV and the Guide
+async function loadGroupNames(sourceId) {
+  $('#chbody').innerHTML = '<div class="card muted">Loading channel groups…</div>';
+  let d; try { d = await api('GET', `/api/admin/group-names?sourceId=${sourceId}`); } catch (e) { $('#chbody').innerHTML = `<div class="card">${esc(e.message)}</div>`; return; }
+  const cats = [...d.categories].sort((a, b) => (!!b.rename - !!a.rename) || a.name.localeCompare(b.name));
+  $('#chbody').innerHTML = `<div class="card"><h3>✏️ Rename channel groups</h3>
+    <p class="muted">Type your own name for any group, e.g. <b>UK| ENTERTAINMENT FHD</b> → <b>Entertainment</b>. Leave a box empty to keep the provider's name. The TVs pick up the new names the next time Live TV or the Guide is opened.</p>
+    <div class="row"><input id="gnq" placeholder="Search groups" style="flex:1"><button class="small primary" id="gnsave">Save</button><button class="small" id="gnback">Back to channels</button></div>
+    <div id="gnlist" style="margin-top:10px;max-height:60vh;overflow:auto">${cats.map((c) => `<div class="gnrow" data-n="${esc((c.name + ' ' + c.rename).toLowerCase())}" style="display:flex;gap:10px;align-items:center;margin:6px 0">
+        <div style="flex:1;min-width:0"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</div><div class="muted" style="font-size:12px">${c.channels} channel${c.channels === 1 ? '' : 's'}</div></div>
+        <input data-id="${esc(c.id)}" value="${esc(c.rename)}" placeholder="${esc(c.name)}" maxlength="60" style="flex:1"></div>`).join('') || '<div class="muted">No channel groups from this source.</div>'}</div></div>`;
+  $('#gnq').oninput = () => { const q = $('#gnq').value.trim().toLowerCase(); document.querySelectorAll('#gnlist .gnrow').forEach((r) => { r.style.display = !q || r.dataset.n.includes(q) ? 'flex' : 'none'; }); };
+  $('#gnback').onclick = () => renderChannels();
+  $('#gnsave').onclick = async () => {
+    const names = {};
+    document.querySelectorAll('#gnlist input[data-id]').forEach((i) => { if (i.value.trim()) names[i.dataset.id] = i.value.trim(); });
+    try { const r = await api('PUT', '/api/admin/group-names', { sourceId, names }); toast(`Saved – ${r.renamed} group${r.renamed === 1 ? '' : 's'} renamed`); } catch (e) { toast(e.message); }
+  };
 }
 
 // 📺 which live categories count as Freeview (still watchable when a "Freeview only" profile runs out of minutes)
