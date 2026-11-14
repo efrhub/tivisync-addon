@@ -1794,9 +1794,32 @@ route('GET', '/api/tv/ratings', 'profile', async (req, b, p, { profile }) => {
 route('GET', '/api/tv/title', 'profile', async (req) => {
   const u = new URL(req.url, 'http://x').searchParams;
   const r = db.prepare('SELECT * FROM title_ratings WHERE source_id = ? AND kind = ? AND ref = ?').get(Number(u.get('sourceId')), String(u.get('kind')), String(u.get('ref') || ''));
-  if (!r) return { age: null, label: null, cert: null, country: null, score: null, votes: null };
-  return { age: r.age, label: ratings.AGE_LABEL(r.age), cert: r.cert, country: r.country, score: r.score || null, votes: r.votes || null, tmdbId: r.tmdb_id };
+  if (!r) return { age: null, label: null, cert: null, country: null, score: null, votes: null, trailer: null };
+  const trailer = r.tmdb_id ? await trailerFor(r.kind, r.tmdb_id) : null;
+  return { age: r.age, label: ratings.AGE_LABEL(r.age), cert: r.cert, country: r.country, score: r.score || null, votes: r.votes || null, tmdbId: r.tmdb_id, trailer };
 });
+
+// ------------------------------------------------------------------ trailers (YouTube, via TMDB)
+const trailerCache = new Map(); // "movie:123" -> { at, v: {key,name,site} | null }
+/** Best YouTube trailer for a TMDB title: official English trailer first, then any trailer, then a teaser. */
+async function trailerFor(kind, tmdbId) {
+  if (!TMDB_KEY()) return null;
+  const ck = kind + ':' + tmdbId;
+  const hit = trailerCache.get(ck);
+  if (hit && Date.now() - hit.at < (hit.v ? 7 : 1) * 86400_000) return hit.v;
+  let v = null;
+  try {
+    const d = await tmdb('/' + (kind === 'movie' ? 'movie' : 'tv') + '/' + tmdbId + '/videos', { include_video_language: 'en,null' });
+    const vids = (d.results || []).filter((x) => x.site === 'YouTube' && x.key);
+    const score = (x) => (x.type === 'Trailer' ? 100 : x.type === 'Teaser' ? 50 : 0) + (x.official ? 20 : 0)
+      + (x.iso_3166_1 === 'GB' ? 6 : x.iso_3166_1 === 'US' ? 4 : 0) + (x.iso_639_1 === 'en' ? 5 : 0);
+    const best = vids.filter((x) => x.type === 'Trailer' || x.type === 'Teaser').sort((a, b) => score(b) - score(a) || String(b.published_at || '').localeCompare(String(a.published_at || '')))[0];
+    if (best) v = { key: best.key, name: best.name || 'Trailer', site: 'YouTube' };
+  } catch (e) { return hit ? hit.v : null; } // TMDB down: don't cache the miss
+  trailerCache.set(ck, { at: Date.now(), v });
+  if (trailerCache.size > 5000) trailerCache.delete(trailerCache.keys().next().value);
+  return v;
+}
 
 // --- "Want to watch" list (per profile, follows them to every TV) ---
 route('GET', '/api/tv/watchlist', 'profile', async (req, b, p, { profile }) =>
