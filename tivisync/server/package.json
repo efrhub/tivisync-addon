@@ -1,0 +1,9 @@
+{
+  "name": "tivisync-server",
+  "version": "1.0.0",
+  "description": "Sync + parental controls server for the TiviSync Android TV IPTV app",
+  "main": "src/server.js",
+  "private": true,
+  "engines": { "node": ">=22.13" },
+  "scripts": { "start": "node --no-warnings src/server.js", "test": "node --no-warnings test/api.test.js" }
+}
