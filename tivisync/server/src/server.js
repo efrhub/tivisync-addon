@@ -1410,6 +1410,65 @@ route('PUT', '/api/admin/today-cameras', 'admin', async (req, b) => {
   return { settings: out };
 });
 
+// --- ⚡ EcoFlow power flow on the Today page (solar → batteries → home → grid), polled every few seconds by the TVs
+const ENERGY_DEFAULTS = {
+  solar: 'sensor.garden_ecoflow_stream_5000_0616_pv_total_power',
+  home: 'sensor.garden_ecoflow_stream_5000_0616_home_power',
+  grid: 'sensor.hall_ecoflow_smart_meter_3840_grid_power',            // + = from the grid, − = to the grid
+  batterySoc: 'sensor.garden_ecoflow_stream_5000_0616_battery_soc',
+  batteryPower: 'sensor.garden_ecoflow_stream_5000_0616_battery_power', // + = charging, − = discharging
+  fridgeSoc: 'sensor.ecoflow_stream_ultra_x_office_battery_soc',
+  fridgeCharge: 'sensor.ecoflow_stream_ultra_x_office_battery_charge_power',
+  fridgeDischarge: 'sensor.ecoflow_stream_ultra_x_office_battery_discharge_power',
+};
+function energyEntities() {
+  let o = {};
+  try { o = JSON.parse(getSetting('energy_entities', '{}')) || {}; } catch { o = {}; }
+  return { ...ENERGY_DEFAULTS, ...o };
+}
+const energyCache = { at: 0, data: null };
+async function energyData() {
+  if (energyCache.data && now() - energyCache.at < 3000) return energyCache.data;
+  const token = process.env.SUPERVISOR_TOKEN;
+  if (!token) return { available: false };
+  const ents = energyEntities();
+  const vals = {};
+  await Promise.all(Object.entries(ents).map(async ([k, id]) => {
+    if (!id) return;
+    try {
+      const r = await fetch(`http://supervisor/core/api/states/${encodeURIComponent(id)}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(4000) });
+      if (!r.ok) return;
+      const st = await r.json();
+      const n = Number(st.state);
+      if (Number.isFinite(n)) vals[k] = n;
+    } catch { /* leave it out */ }
+  }));
+  const r0 = (v) => (v == null ? null : Math.round(v));
+  const fridgePower = vals.fridgeCharge != null || vals.fridgeDischarge != null ? (vals.fridgeCharge || 0) - (vals.fridgeDischarge || 0) : null;
+  const data = {
+    available: vals.solar != null || vals.batterySoc != null || vals.home != null,
+    solar: r0(vals.solar), home: r0(vals.home), grid: r0(vals.grid),
+    battery: { soc: r0(vals.batterySoc), power: r0(vals.batteryPower) },
+    fridge: vals.fridgeSoc != null ? { soc: r0(vals.fridgeSoc), power: r0(fridgePower) } : null,
+  };
+  energyCache.data = data; energyCache.at = now();
+  return data;
+}
+route('GET', '/api/tv/energy', 'device', async () => energyData());
+route('GET', '/api/admin/energy-entities', 'admin', async () => ({ entities: energyEntities(), defaults: ENERGY_DEFAULTS }));
+route('PUT', '/api/admin/energy-entities', 'admin', async (req, b) => {
+  const out = {};
+  for (const [k, v] of Object.entries(b.entities || {})) {
+    if (!(k in ENERGY_DEFAULTS)) continue;
+    if (v === '' || v == null) { out[k] = ''; continue; }
+    if (!/^sensor\.[a-z0-9_]+$/.test(String(v))) throw new HttpError(400, `Not a sensor: ${v}`);
+    out[k] = String(v);
+  }
+  setSetting('energy_entities', JSON.stringify(out));
+  energyCache.data = null;
+  return { entities: energyEntities() };
+});
+
 // --- radio: UK (or any) stations from the free Radio Browser directory (radio-browser.info)
 const RADIO_HOSTS = ['de1.api.radio-browser.info', 'nl1.api.radio-browser.info', 'at1.api.radio-browser.info', 'all.api.radio-browser.info'];
 const radioCache = new Map();

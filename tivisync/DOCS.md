@@ -37,3 +37,7 @@ Family Planner uses the same alerts to check extra jobs, and adds TV time for ch
 ## TV guide and channel icons every 24 hours (1.21.0, app build with patch 057)
 
 Every night at 3am the add-on downloads the full TV guide (the source's EPG address, an uploaded guide file, or the Xtream provider's `xmltv.php`) and the latest channel icons. If a night is missed (Home Assistant was off), it catches up within the hour. The guide is stored for the channels at least one profile can see (up to 4,000), 8 days ahead, with a week of past programmes for catch-up channels. TVs read guide rows, now/next and guide search from Home Assistant and only ask the provider for channels the add-on doesn't keep. Channels without a logo get the icon from the guide, or from the tv-logos list (now rebuilt daily). Panel: Channels › 🗓 TV guide shows when it last ran and has an **Update now** button.
+
+## EcoFlow power flow on Today (1.23.0, app build with patch 059)
+The 📋 Today page shows a live power-flow box next to the weather: solar, the main battery (charge %), home use and the grid, with moving dots showing which way the power goes, plus the fridge battery's charge. TVs ask `GET /api/tv/energy` every 5 seconds.
+The sensors default to the EcoFlow STREAM 5000, the STREAM Ultra X (fridge battery) and the EcoFlow smart meter. To use other sensors, `PUT /api/admin/energy-entities` with `{"entities": {"solar": "sensor.…", "home": …, "grid": …, "batterySoc": …, "batteryPower": …, "fridgeSoc": …, "fridgeCharge": …, "fridgeDischarge": …}}` (empty string = not used).
