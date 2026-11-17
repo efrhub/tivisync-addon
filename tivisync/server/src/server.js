@@ -1753,8 +1753,42 @@ async function rateTitles() {
         }
       }));
     }
+    await fillGenres();
   } catch (e) { ratingRun.error = e.message; }
   ratingRun.running = false;
+}
+
+/** TMDB genres for every title that has a TMDB id but no genres yet (one details call each; same id looked up once). */
+async function fillGenres() {
+  const setGenres = db.prepare('UPDATE title_ratings SET genres = ? WHERE source_id = ? AND kind = ? AND ref = ?');
+  const seen = new Map(); // "movie:123" -> "Action|Comedy"
+  ratingRun.genres = 0;
+  for (;;) {
+    const batch = db.prepare('SELECT source_id, kind, ref, tmdb_id FROM title_ratings WHERE tmdb_id IS NOT NULL AND genres IS NULL LIMIT 40').all();
+    if (!batch.length) break;
+    let failed = 0;
+    await Promise.all([0, 1, 2, 3].map(async (w) => {
+      for (let i = w; i < batch.length; i += 4) {
+        const t = batch[i];
+        const key = t.kind + ':' + t.tmdb_id;
+        let g = seen.get(key);
+        if (g === undefined) {
+          try {
+            const d = await tmdb(`/${t.kind === 'movie' ? 'movie' : 'tv'}/${t.tmdb_id}`, { language: 'en-GB' });
+            g = (d.genres || []).map((x) => String(x.name || '').replace(/\|/g, '/')).filter(Boolean).join('|');
+          } catch (e) {
+            if (/TMDB 429/.test(e.message)) { await new Promise((res) => setTimeout(res, 5000)); failed++; continue; } // try again next batch
+            if (/TMDB 404/.test(e.message)) g = '';
+            else { failed++; g = ''; }
+          }
+          seen.set(key, g);
+        }
+        setGenres.run(g, t.source_id, t.kind, t.ref);
+        ratingRun.genres++;
+      }
+    }));
+    if (failed >= batch.length) break; // TMDB not answering – carry on next run
+  }
 }
 if (!process.env.NO_CHARTS) {
   setTimeout(() => rateTitles().catch(() => {}), 60_000).unref();
@@ -1768,10 +1802,23 @@ route('GET', '/api/admin/ratings', 'admin', async (req) => {
   const counts = Object.fromEntries(db.prepare(`SELECT status, COUNT(*) n FROM title_ratings ${where} GROUP BY status`).all(...args).map((r) => [r.status, r.n]));
   const missing = db.prepare(`SELECT source_id, kind, ref, name, year FROM title_ratings ${where ? where + ' AND' : 'WHERE'} status IN ('none','error') ORDER BY kind, name LIMIT 500`).all(...args);
   const manual = db.prepare(`SELECT source_id, kind, ref, name, year, age FROM title_ratings ${where ? where + ' AND' : 'WHERE'} status = 'manual' ORDER BY name LIMIT 500`).all(...args);
-  return { counts, running: ratingRun.running, done: ratingRun.done, error: ratingRun.error, tmdbKey: !!TMDB_KEY(),
+  const genresPending = db.prepare(`SELECT COUNT(*) n FROM title_ratings ${where ? where + ' AND' : 'WHERE'} tmdb_id IS NOT NULL AND genres IS NULL`).get(...args).n;
+  return { counts, running: ratingRun.running, done: ratingRun.done, error: ratingRun.error, tmdbKey: !!TMDB_KEY(), genresPending, genresDone: ratingRun.genres || 0,
     missing: missing.map((m) => ({ sourceId: m.source_id, kind: m.kind, ref: m.ref, name: m.name, year: m.year })),
     manual: manual.map((m) => ({ sourceId: m.source_id, kind: m.kind, ref: m.ref, name: m.name, year: m.year, age: m.age, label: ratings.AGE_LABEL(m.age) })) };
 });
+// TMDB genres for the app's own Films / Series groups: { genres: [names], movies: {ref: [genre index…]}, series: {…}, pending }
+route('GET', '/api/tv/genres', 'device', async (req) => {
+  const sourceId = Number(new URL(req.url, 'http://x').searchParams.get('sourceId'));
+  const names = [], idx = new Map(), movies = {}, series = {};
+  for (const r of db.prepare("SELECT kind, ref, genres FROM title_ratings WHERE source_id = ? AND genres IS NOT NULL AND genres != ''").all(sourceId)) {
+    const ids = r.genres.split('|').map((g) => { if (!idx.has(g)) { idx.set(g, names.length); names.push(g); } return idx.get(g); });
+    (r.kind === 'movie' ? movies : series)[r.ref] = ids;
+  }
+  const pending = db.prepare('SELECT COUNT(*) n FROM title_ratings WHERE source_id = ? AND tmdb_id IS NOT NULL AND genres IS NULL').get(sourceId).n;
+  return { genres: names, movies, series, pending };
+});
+
 route('POST', '/api/admin/ratings/run', 'admin', async () => { rateTitles().catch(() => {}); return { started: true }; });
 // set a rating by hand: { sourceId, kind, ref, age (0|8|12|15|18|null to look it up again) }
 route('PUT', '/api/admin/ratings', 'admin', async (req, b) => {
