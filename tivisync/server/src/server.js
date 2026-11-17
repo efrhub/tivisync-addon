@@ -1387,7 +1387,7 @@ async function dashboardData() {
     .map((s) => name(s).replace(/\s*(opening|contact|sensor)$/i, '')).filter((v, i, a) => a.indexOf(v) === i).slice(0, 12);
   const cams = states.filter((s) => s.entity_id.startsWith('camera.') && s.state !== 'unavailable').map((s) => ({ entity: s.entity_id, name: name(s).replace(/\s*fluent$/i, '') })).slice(0, 8);
   const profiles = db.prepare('SELECT * FROM profiles ORDER BY name').all();
-  const jobs = (await Promise.all(profiles.map((p) => familyPlannerStatus(p).then((d) => d && { name: d.name || p.name, chores: (d.chores || []).map(String).slice(0, 8) }).catch(() => null)))).filter(Boolean);
+  const jobs = (await Promise.all(profiles.map((p) => familyPlannerStatus(p).then((d) => d && { name: d.name || p.name, chores: (d.chores || []).map(String).slice(0, 8), count: (d.chores || []).length, minutes: Number.isFinite(+d.minutes) && d.minutes !== undefined ? Math.round(+d.minutes) : null }).catch(() => null)))).filter(Boolean);
   const data = { weather: await weather(states), people, jobs, reminders: await homeReminders(), open, cameras: cams };
   dashCache.data = data; dashCache.at = now();
   return data;

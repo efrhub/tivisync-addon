@@ -1264,8 +1264,11 @@ async function api(req, res, url) {
     if (!want || !hit) return send(res, 200, { linked: false, chores: [] });
     const [id, l] = hit;
     const r = remindersFor({ id, ...activeRoles(l) });
-    const chores = r.ids.filter(cid => db.chores[cid]).map(cid => db.chores[cid].title);
-    return send(res, 200, { linked: true, name: db.members[id].name, chores });
+    const list = r.ids.filter(cid => db.chores[cid]);
+    const chores = list.map(cid => db.chores[cid].title);
+    /* total time the outstanding jobs should take (TiviSync's Today card shows "3 jobs outstanding (1 h 15 min)") */
+    const minutes = list.reduce((t, cid) => t + (+db.chores[cid].minutes || 0), 0);
+    return send(res, 200, { linked: true, name: db.members[id].name, chores, minutes });
   }
   /* TiviSync's Today screen: where people are right now and until when (work, school, an activity, away). */
   if (route[0] === 'internal' && route[1] === 'tv-whereabouts' && method === 'GET') {
