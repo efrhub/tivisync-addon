@@ -186,6 +186,8 @@ for (const sql of [
   // when a series last gained episodes (for the "New episodes" row), and which app build each TV runs
   'ALTER TABLE series_totals ADD COLUMN grown_at INTEGER',
   'ALTER TABLE devices ADD COLUMN app_build TEXT',
+  // TMDB genres per title ("Action|Comedy"; '' = none / not found) for the app's own Films / Series groups
+  'ALTER TABLE title_ratings ADD COLUMN genres TEXT',
 ]) {
   try { db.exec(sql); } catch { /* already exists */ }
 }
