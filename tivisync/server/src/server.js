@@ -1069,8 +1069,19 @@ function startHaListener() {
   const connect = () => {
     let ws;
     try { ws = new WebSocket('ws://supervisor/core/websocket'); } catch (e) { haLive.error = e.message; setTimeout(connect, 30_000); return; }
+    // Watchdog: if Home Assistant stops answering (e.g. the socket went half-dead while the server was busy),
+    // close it so onclose reconnects – otherwise alerts, doorbell and announcements silently stop.
+    let lastMsg = now(), pingId = null, gone = false;
+    const reconnect = (why) => { if (gone) return; gone = true; clearInterval(watchdog); if (haSock === ws) haSock = null; haLive.connected = false; console.log(`Home Assistant connection ${why} – reconnecting in 15 s`); setTimeout(connect, 15_000); };
+    const watchdog = setInterval(() => {
+      if (ws.readyState !== 1) return;
+      if (now() - lastMsg > 90_000) { try { ws.close(); } catch { /* ignore */ } reconnect('silent for 90 s'); return; }
+      if (now() - lastMsg > 45_000) { pingId = ++id; try { ws.send(JSON.stringify({ id: pingId, type: 'ping' })); } catch { /* ignore */ } }
+    }, 15_000);
     ws.onmessage = (ev) => {
+      lastMsg = now();
       let m; try { m = JSON.parse(ev.data); } catch { return; }
+      if (m.type === 'pong') return;
       if (m.type === 'auth_required') ws.send(JSON.stringify({ type: 'auth', access_token: token }));
       else if (m.type === 'auth_invalid') { haLive.error = 'Home Assistant refused the add-on token'; ws.close(); }
       else if (m.type === 'auth_ok') {
@@ -1112,7 +1123,7 @@ function startHaListener() {
         }
       }
     };
-    ws.onclose = () => { haLive.connected = false; setTimeout(connect, 15_000); };
+    ws.onclose = () => reconnect('closed');
     ws.onerror = () => { haLive.error = haLive.error || 'cannot reach Home Assistant'; try { ws.close(); } catch { /* ignore */ } };
   };
   connect();
