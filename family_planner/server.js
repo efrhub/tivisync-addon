@@ -51,7 +51,7 @@ const EMAIL_ERROR = 'Enter a valid email address.';
 const MIN_PASSWORD = 8;
 
 /* ---------- storage: one JSON file, replaced atomically ---------- */
-const empty = () => ({ rooms: {}, chores: {}, log: {}, meta: {}, schedules: {}, holidays: {}, work: {}, away: {}, events: {}, trips: {}, outings: {}, deviceAsks: {}, awayReasons: {}, reasonsSeeded: false, sick: {}, dinners: {}, dinnerTasks: {}, nights: {}, nightTypes: {}, nightGroups: [], nightSeeded: false, shop: {}, photos: {}, reviews: {}, push: {}, pushPrefs: {}, pushSent: {}, vapid: null, chat: {}, activity: [], shifts: {}, updates: [], lastBackup: null, members: {}, logins: {}, sessions: {}, haLinks: {}, speakSent: {}, tvSent: {}, dailySent: {} });
+const empty = () => ({ rooms: {}, chores: {}, log: {}, meta: {}, schedules: {}, holidays: {}, work: {}, away: {}, events: {}, trips: {}, outings: {}, deviceAsks: {}, awayReasons: {}, reasonsSeeded: false, sick: {}, dinners: {}, dinnerTasks: {}, nights: {}, nightTypes: {}, nightGroups: [], nightSeeded: false, shop: {}, photos: {}, reviews: {}, push: {}, pushPrefs: {}, pushSent: {}, vapid: null, chat: {}, activity: [], shifts: {}, pay: {}, updates: [], lastBackup: null, members: {}, logins: {}, sessions: {}, haLinks: {}, speakSent: {}, tvSent: {}, dailySent: {} });
 let db = empty();
 let saveTimer = null;
 
@@ -257,6 +257,7 @@ function mayReceive(memberId, event) {
     return true;
   }
   if (event.coll === 'reviews') return seesAll(memberId);
+  if (event.coll === 'pay') return seesAll(memberId) || (!!event.doc && event.doc.memberId === memberId && event.doc.status === 'approved');
   if (event.coll === 'shifts') return (db.logins[memberId] && activeRoles(db.logins[memberId]).admin) || event.owner === memberId;
   return true;
 }
@@ -301,7 +302,7 @@ function stateFor(user) {
   const titles = {};
   for (const l of Object.values(db.log)) if (l.shiftId && !l.rejected) (titles[l.shiftId] = titles[l.shiftId] || []).push(l.title);
   const shifts = Object.entries(db.shifts).filter(([, s]) => user.admin || s.memberId === user.id).map(([id, s]) => [id, { ...s, done: titles[id] || [] }]);
-  return { rooms: db.rooms, chores: hidden ? {} : user.admin ? db.chores : Object.fromEntries(Object.entries(db.chores).filter(([, c]) => choreVisibleTo(user.id, c))), members: db.members, meta: db.meta, schedules: user.admin ? db.schedules : (db.schedules[user.id] ? { [user.id]: db.schedules[user.id] } : {}), holidays: user.admin ? db.holidays : holidaysFor(user.id), work: user.admin ? db.work : Object.fromEntries(Object.entries(db.work).filter(([, w]) => w.memberId === user.id)), away: user.admin ? db.away : Object.fromEntries(Object.entries(db.away).filter(([, a]) => a.memberId === user.id || a.coverId === user.id)), chat: db.chat, shop: db.shop, lastDone: lastDoneFor(user), outings: user.admin ? db.outings : Object.fromEntries(Object.entries(db.outings).filter(([, o]) => o.memberId === user.id)), deviceAsks: user.admin ? db.deviceAsks : Object.fromEntries(Object.entries(db.deviceAsks).filter(([, q]) => q.memberId === user.id)), awayReasons: db.awayReasons, sick: user.admin ? db.sick : (db.sick[user.id] ? { [user.id]: db.sick[user.id] } : {}), dinners: db.dinners, dinnerTasks: db.dinnerTasks, nights: db.nights, nightTypes: db.nightTypes, nightGroups: db.nightGroups, trips: db.trips, reviews: user.admin ? db.reviews : {}, events: user.admin ? db.events : eventsFor(user.id), shifts: Object.fromEntries(shifts), log: hidden ? {} : Object.fromEntries(user.admin ? log : log.filter(([, l]) => logVisibleTo(user.id, l))), me: { id: user.id, name: user.name, username: user.username, admin: user.admin, cleaner: user.cleaner, system: user.system, canSwitch: user.canSwitch, mode: user.mode }, logins: publicLogins(user), withSignIn: Object.keys(db.logins), changes: CHANGES, levels: Object.fromEntries(GROUPS.map(n => [n, levelIds(n)])), everyoneIds: Object.entries(db.logins).filter(([id, l]) => l.cleaner && !isOff(id, houseClock().date)).map(([id]) => id), birthdays: birthdaysFor(user), version: VERSION };
+  return { rooms: db.rooms, chores: hidden ? {} : user.admin ? db.chores : Object.fromEntries(Object.entries(db.chores).filter(([, c]) => choreVisibleTo(user.id, c))), members: db.members, meta: db.meta, schedules: user.admin ? db.schedules : (db.schedules[user.id] ? { [user.id]: db.schedules[user.id] } : {}), holidays: user.admin ? db.holidays : holidaysFor(user.id), work: user.admin ? db.work : Object.fromEntries(Object.entries(db.work).filter(([, w]) => w.memberId === user.id)), away: user.admin ? db.away : Object.fromEntries(Object.entries(db.away).filter(([, a]) => a.memberId === user.id || a.coverId === user.id)), chat: db.chat, shop: db.shop, lastDone: lastDoneFor(user), outings: user.admin ? db.outings : Object.fromEntries(Object.entries(db.outings).filter(([, o]) => o.memberId === user.id)), deviceAsks: user.admin ? db.deviceAsks : Object.fromEntries(Object.entries(db.deviceAsks).filter(([, q]) => q.memberId === user.id)), awayReasons: db.awayReasons, sick: user.admin ? db.sick : (db.sick[user.id] ? { [user.id]: db.sick[user.id] } : {}), dinners: db.dinners, dinnerTasks: db.dinnerTasks, nights: db.nights, nightTypes: db.nightTypes, nightGroups: db.nightGroups, trips: db.trips, reviews: user.admin ? db.reviews : {}, pay: user.admin ? db.pay : Object.fromEntries(Object.entries(db.pay).filter(([, p]) => p.memberId === user.id && p.status === 'approved')), events: user.admin ? db.events : eventsFor(user.id), shifts: Object.fromEntries(shifts), log: hidden ? {} : Object.fromEntries(user.admin ? log : log.filter(([, l]) => logVisibleTo(user.id, l))), me: { id: user.id, name: user.name, username: user.username, admin: user.admin, cleaner: user.cleaner, system: user.system, canSwitch: user.canSwitch, mode: user.mode }, logins: publicLogins(user), withSignIn: Object.keys(db.logins), changes: CHANGES, levels: Object.fromEntries(GROUPS.map(n => [n, levelIds(n)])), everyoneIds: Object.entries(db.logins).filter(([id, l]) => l.cleaner && !isOff(id, houseClock().date)).map(([id]) => id), birthdays: birthdaysFor(user), version: VERSION };
 }
 /* People only see their own school times and holidays, and never who else a holiday is for. */
 function holidaysFor(id) {
@@ -1033,6 +1034,126 @@ function checkJob(id, yes, by) {
   if (l.by && db.logins[l.by]) notify(l.by, 'chores', { title: yes ? 'Extra job approved' : 'Extra job not approved', body: `${l.title}, by ${by}.`, url: '/#today', tag: `check-${id}` });
   return true;
 }
+/* ---------- weekly pocket money ----------
+ * Every Friday at 17:00 the adults get a suggested amount for each child for the previous Monday to Sunday:
+ * minutes of chores done (and extra jobs once approved) at PAY_PER_HOUR, minus PAY_SENT_BACK for every job sent back.
+ * It goes to the adults' phones (Approve, Snooze, Edit amount) and into Family Planner's Needs you box.
+ * Once approved, the child is told how much they're getting. */
+const PAY_PER_HOUR = +(process.env.PAY_PER_HOUR || 4);
+const PAY_SENT_BACK = +(process.env.PAY_SENT_BACK || 0.25);
+const PAY_TIME = '17:00';
+const PHONES = (() => { const m = new Map(); for (const line of String(process.env.PHONES || '').split('\n')) { const x = /^\s*([^=]+?)\s*=\s*(notify\.)?([a-z0-9_]+)\s*$/i.exec(line); if (x) m.set(x[1].toLowerCase(), x[3]); } return m; })();
+const phoneOf = id => PHONES.get((db.members[id]?.name || '').trim().toLowerCase()) || PHONES.get((db.members[id]?.name || '').trim().split(/\s+/)[0].toLowerCase());
+const money = n => `£${(Math.round(n * 100) / 100).toFixed(2)}`;
+const houseDateOf = ms => { const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: HOUSE_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(ms)).map(x => [x.type, x.value])); return `${p.year}-${p.month}-${p.day}`; };
+const shortDay = d => new Date(d + 'T12:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+const payKids = () => Object.keys(db.logins).filter(id => db.members[id] && db.logins[id].cleaner && !db.logins[id].admin);
+const payAdults = () => Object.keys(db.logins).filter(id => db.members[id] && db.logins[id].admin);
+/* A child's own bedroom isn't paid: a room whose name has "bedroom" and their first name (e.g. "Shakira Bedroom"). */
+const ownBedroom = (memberId, roomId) => { const n = (db.rooms[roomId]?.name || '').toLowerCase(), first = (db.members[memberId]?.name || '').trim().split(/\s+/)[0].toLowerCase(); return !!first && n.includes('bedroom') && n.includes(first); };
+function payFigures(memberId, week) {
+  const end = addDay(week, 6);
+  const all = Object.values(db.log).filter(l => l.by === memberId && !l.rejected && !l.pending && l.date >= week && l.date <= end);
+  const done = all.filter(l => !ownBedroom(memberId, l.roomId)), bedroom = all.length - done.length;
+  const back = Object.values(db.log).filter(l => l.by === memberId && !ownBedroom(memberId, l.roomId) && l.rejected && !(l.extra && l.rejected.note === 'Not approved') && l.rejected.at && houseDateOf(l.rejected.at) >= week && houseDateOf(l.rejected.at) <= end);
+  const minutes = done.reduce((t, l) => t + (+l.minutes || 0), 0), extraMinutes = done.filter(l => l.extra).reduce((t, l) => t + (+l.minutes || 0), 0);
+  const earned = Math.round(minutes / 60 * PAY_PER_HOUR * 100) / 100, fee = Math.round(back.length * PAY_SENT_BACK * 100) / 100;
+  return { minutes, extraMinutes, bedroom, jobs: done.length, returned: back.length, returnedTitles: back.map(l => l.title).slice(0, 10), rate: PAY_PER_HOUR, fee: PAY_SENT_BACK, earned, suggested: Math.max(0, Math.round((earned - fee) * 100) / 100) };
+}
+const hrs = m => { const h = Math.floor(m / 60), r = Math.round(m % 60); return h ? `${h} h${r ? ` ${r} min` : ''}` : `${r} min`; };
+function payText(p) {
+  const name = db.members[p.memberId]?.name || 'Someone';
+  const lines = [`${p.jobs} ${p.jobs === 1 ? 'job' : 'jobs'}, ${hrs(p.minutes)} × ${money(p.rate)}/h = ${money(p.earned)}`];
+  if (p.extraMinutes) lines.push(`(includes ${hrs(p.extraMinutes)} of extra jobs)`);
+  if (p.bedroom) lines.push(`${p.bedroom} own-bedroom ${p.bedroom === 1 ? 'job' : 'jobs'} not paid`);
+  if (p.returned) lines.push(`${p.returned} sent back × ${Math.round(p.fee * 100)}p = −${money(p.returned * p.fee)}`);
+  lines.push(`Suggested: ${money(p.suggested)}`);
+  if (p.amount !== p.suggested) lines.push(`Changed to ${money(p.amount)}${p.editedBy ? ` by ${p.editedBy}` : ''}`);
+  return { title: `💷 ${name}'s pay, ${shortDay(p.week)} to ${shortDay(addDay(p.week, 6))}: ${money(p.amount)}`, message: lines.join('\n') };
+}
+async function phoneSend(service, data) { try { await haService('notify', service, data); } catch (e) { console.error(`Phone message to ${service}:`, e.message); } }
+async function payAsk(id) {
+  const p = db.pay[id]; if (!p || p.status !== 'pending') return;
+  const t = payText(p);
+  for (const a of payAdults()) {
+    const service = phoneOf(a); if (!service) continue;
+    await phoneSend(service, { title: t.title, message: t.message, data: { tag: `fp-pay-${id}`, sticky: 'true', clickAction: '/hassio/ingress/e53481c0_family_planner', actions: [
+      { action: `FP_PAY_OK_${id}`, title: `Approve ${money(p.amount)}` }, { action: `FP_PAY_SNOOZE_${id}`, title: 'Snooze' },
+      { action: `FP_PAY_EDIT_${id}`, title: 'Edit', behavior: 'textInput', textInputButtonTitle: 'Save', textInputPlaceholder: 'Amount, e.g. 10.50' }] } });
+  }
+  p.sentAt = Date.now(); save();
+}
+async function payClear(id) { for (const a of payAdults()) { const s = phoneOf(a); if (s) await phoneSend(s, { message: 'clear_notification', data: { tag: `fp-pay-${id}` } }); } }
+function payChange(id, what, by, amount) {
+  const p = db.pay[id]; if (!p || p.status !== 'pending') return 'That pay has already been sorted.';
+  if (what === 'approve') {
+    if (amount !== undefined) { p.amount = amount; p.editedBy = by; }
+    p.status = 'approved'; p.approvedBy = by; p.approvedAt = Date.now(); delete p.snoozeUntil;
+    save(); broadcast({ coll: 'pay', id, doc: p });
+    payClear(id).catch(() => {});
+    const kid = phoneOf(p.memberId), wk = `${shortDay(p.week)} to ${shortDay(addDay(p.week, 6))}`;
+    const body = `You're getting ${money(p.amount)} for your jobs from ${wk}. Approved by ${by}.${p.returned ? ` (${p.returned} sent back, ${Math.round(p.fee * 100)}p each.)` : ''}`;
+    if (kid) phoneSend(kid, { title: '💷 Pocket money approved', message: body, data: { tag: `fp-paid-${id}` } });
+    notify(p.memberId, 'chores', { title: 'Pocket money approved', body, url: '/#progress', tag: `paid-${id}` }, true);
+    console.log(`Pay approved: ${db.members[p.memberId]?.name} ${money(p.amount)} by ${by}`);
+    return '';
+  }
+  if (what === 'snooze') {
+    const c = houseClock(); p.snoozeUntil = `${addDay(c.date, 1)} 09:00`; p.snoozedBy = by;
+    save(); broadcast({ coll: 'pay', id, doc: p }); payClear(id).catch(() => {});
+    return '';
+  }
+  if (what === 'edit') {
+    if (!(amount >= 0 && amount <= 500)) return 'Enter an amount between £0 and £500.';
+    p.amount = Math.round(amount * 100) / 100; p.editedBy = by; delete p.snoozeUntil;
+    save(); broadcast({ coll: 'pay', id, doc: p }); payAsk(id).catch(() => {});
+    return '';
+  }
+  return 'Unknown change.';
+}
+async function payCheck() {
+  if (!payKids().length) return;
+  const c = houseClock(), now = `${c.date} ${c.time}`;
+  if (dayNum(c.date) === 5 && c.time >= PAY_TIME) {
+    const week = addDay(c.date, -11); // Monday of the week before (Friday - 4 days = this Monday, - 7 more)
+    for (const kid of payKids()) {
+      const id = `${week}-${kid}`;
+      if (db.pay[id]) continue;
+      const f = payFigures(kid, week);
+      if (!f.jobs && !f.returned) continue;
+      db.pay[id] = { memberId: kid, week, ...f, amount: f.suggested, status: 'pending', createdAt: Date.now() };
+      save(); broadcast({ coll: 'pay', id, doc: db.pay[id] });
+      await payAsk(id);
+    }
+  }
+  for (const [id, p] of Object.entries(db.pay)) if (p.status === 'pending' && p.snoozeUntil && p.snoozeUntil <= now) { delete p.snoozeUntil; save(); broadcast({ coll: 'pay', id, doc: p }); await payAsk(id); }
+  /* keep a year of history */
+  const cutoff = addDay(c.date, -366);
+  for (const [id, p] of Object.entries(db.pay)) if (p.week < cutoff) { delete db.pay[id]; save(); }
+}
+/* Who pressed a button on their phone: the Home Assistant user, linked to an admin in Family Planner (by link or by name). */
+async function adultFromHaUser(userId) {
+  if (!userId) return null;
+  const linked = db.haLinks[userId];
+  if (linked && db.logins[linked]?.admin && db.members[linked]) return db.members[linked].name;
+  try {
+    const r = await fetch('http://supervisor/core/api/states', { headers: { Authorization: `Bearer ${process.env.SUPERVISOR_TOKEN}` }, signal: AbortSignal.timeout(5000) });
+    const person = (await r.json()).find(x => x.entity_id.startsWith('person.') && x.attributes?.user_id === userId);
+    const first = String(person?.attributes?.friendly_name || '').trim().split(/\s+/)[0].toLowerCase();
+    const hit = Object.keys(db.logins).find(id => db.logins[id].admin && (db.members[id]?.name || '').trim().split(/\s+/)[0].toLowerCase() === first);
+    return hit ? db.members[hit].name : null;
+  } catch { return null; }
+}
+async function payPhoneAction(d, userId) {
+  const m = /^FP_PAY_(OK|SNOOZE|EDIT)_(.+)$/.exec(String(d.action || ''));
+  if (!m || !db.pay[m[2]]) return;
+  const by = await adultFromHaUser(userId);
+  if (!by) { console.log('Pay button pressed by someone who is not an adult in Family Planner; ignored.'); return; }
+  if (m[1] === 'EDIT') {
+    const amount = parseFloat(String(d.reply_text || '').replace(/[£,\s]/g, ''));
+    const err = payChange(m[2], 'edit', by, amount); if (err) console.log(`Pay edit refused: ${err}`);
+  } else payChange(m[2], m[1] === 'OK' ? 'approve' : 'snooze', by);
+}
 /* Answers from TiviSync (adult TV or phone) arrive over Home Assistant's event bus. */
 function startHaListener() {
   const token = process.env.SUPERVISOR_TOKEN;
@@ -1044,11 +1165,12 @@ function startHaListener() {
     ws.onmessage = ev => {
       let m; try { m = JSON.parse(ev.data); } catch { return; }
       if (m.type === 'auth_required') ws.send(JSON.stringify({ type: 'auth', access_token: token }));
-      else if (m.type === 'auth_ok') ws.send(JSON.stringify({ id: ++n, type: 'subscribe_events', event_type: 'tivisync_approval_answer' }));
+      else if (m.type === 'auth_ok') { ws.send(JSON.stringify({ id: ++n, type: 'subscribe_events', event_type: 'tivisync_approval_answer' })); ws.send(JSON.stringify({ id: ++n, type: 'subscribe_events', event_type: 'mobile_app_notification_action' })); }
       else if (m.type === 'event' && m.event?.event_type === 'tivisync_approval_answer') {
         const d = m.event.data || {}, hit = /^fp-(.+)$/.exec(String(d.id || ''));
         if (hit && checkJob(hit[1], d.value === 'yes', String(d.by || 'an adult').slice(0, 60))) console.log(`Job check (${d.value}) by ${d.by}`);
       }
+      else if (m.type === 'event' && m.event?.event_type === 'mobile_app_notification_action') payPhoneAction(m.event.data || {}, m.event.context?.user_id).catch(e => console.error('Pay button:', e.message));
     };
     ws.onclose = () => setTimeout(connect, 15000);
     ws.onerror = () => { try { ws.close(); } catch {} };
@@ -1462,6 +1584,13 @@ async function api(req, res, url) {
   if (route[0] === 'outings') return await outingsApi(req, res, route, user);
   if (route[0] === 'device-asks') return await asksApi(req, res, route, user);
   if (['nights', 'night-types', 'night-groups'].includes(route[0])) return await nightsApi(req, res, route, user);
+  if (route[0] === 'pay' && route[1] && db.pay[route[1]] && method === 'POST' && ['approve', 'snooze', 'edit'].includes(route[2])) {
+    if (!user.admin) return fail(res, 403, ADMIN_ONLY);
+    const body = await readJson(req), amount = body.amount === undefined || body.amount === '' ? undefined : +body.amount;
+    if (amount !== undefined && !(amount >= 0 && amount <= 500)) return fail(res, 400, 'Enter an amount between £0 and £500.');
+    const err = payChange(route[1], route[2], user.name, amount);
+    return err ? fail(res, 400, err) : send(res, 200, { ok: true });
+  }
   if (route[0] === 'shop') {
     if (route[1] === 'items' && !route[2] && method === 'POST') return addShopItem(res, (await readJson(req)).text, user.name);
     const id = route[2], item = id && db.shop[id];
@@ -1909,6 +2038,7 @@ function start() {
   setInterval(() => tvReminders().catch(e => console.error(e)), +process.env.ROTA_TV_EVERY || 5 * 60 * 1000).unref();
   setInterval(() => tvDaily().catch(e => console.error(e)), +process.env.ROTA_TV_EVERY || 5 * 60 * 1000).unref();
   setTimeout(publishShopSoon, 3000);
+  setInterval(() => payCheck().catch(e => console.error('Pay:', e.message)), +process.env.ROTA_CHECK_EVERY || 60 * 1000).unref();
   setInterval(publishShopSoon, 5 * 60 * 1000).unref();
   if (!process.env.NO_HA_LISTENER) setTimeout(startHaListener, 2000);
   if (SPEAKERS.size) console.log(`Spoken reminders on: ${[...SPEAKERS].map(([n, e]) => `${n} → ${e}`).join(', ')}`);
