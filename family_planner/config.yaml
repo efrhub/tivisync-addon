@@ -1,5 +1,5 @@
 name: Family Planner
-version: "3.1.2"
+version: "3.3.0"
 slug: family_planner
 description: Household chores, schedules, dinners and shopping list for the family
 url: https://github.com/efrhub/tivisync-addon
@@ -36,6 +36,13 @@ options:
   tts_language: en-GB
   tv_remind_minutes: 30
   tivisync_url: http://e53481c0-tivisync:8080
+  phones:
+    - "David=notify.mobile_app_home_47"
+    - "Lisa=notify.mobile_app_pixel_10_pro_xl"
+    - "Joshua=notify.mobile_app_josh_phone"
+    - "Shakira=notify.mobile_app_pixel_7_pro"
+  pay_per_hour: 4
+  pay_sent_back: 0.25
 schema:
   tz: str
   trust_proxy: bool
@@ -48,3 +55,7 @@ schema:
   tts_language: str?
   tv_remind_minutes: int(0,240)
   tivisync_url: url
+  phones:
+    - str
+  pay_per_hour: float(0,50)
+  pay_sent_back: float(0,10)
