@@ -13,6 +13,9 @@ export SPEAK_AFTER_MINUTES="$(opt speak_after_minutes)"; [ -n "$SPEAK_AFTER_MINU
 export TTS_ENTITY="$(opt tts_entity)"; [ -n "$TTS_ENTITY" ] || TTS_ENTITY=tts.home_assistant_cloud
 export TTS_LANGUAGE="$(opt tts_language)"
 export TV_REMIND_MINUTES="$(opt tv_remind_minutes)"; [ -n "$TV_REMIND_MINUTES" ] || TV_REMIND_MINUTES=30
+export PHONES="$(node -e "try{const o=require('$OPT');process.stdout.write((o.phones||[]).join('\\n'))}catch(e){}")"
+export PAY_PER_HOUR="$(opt pay_per_hour)"; [ -n "$PAY_PER_HOUR" ] || PAY_PER_HOUR=4
+export PAY_SENT_BACK="$(opt pay_sent_back)"; [ -n "$PAY_SENT_BACK" ] || PAY_SENT_BACK=0.25
 export TIVISYNC_URL="$(opt tivisync_url)"; [ -n "$TIVISYNC_URL" ] || TIVISYNC_URL=http://e53481c0-tivisync:8080
 mkdir -p "$DATA_DIR" "$UPDATER_DIR" /share/family-planner
 cd /app
