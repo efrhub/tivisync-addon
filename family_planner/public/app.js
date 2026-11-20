@@ -92,12 +92,12 @@ function buildHome(o, today) {
 }
 
 /* ---------- store: the server is the record, and every open device gets changes live ---------- */
-const S = { rooms: new Map(), chores: new Map(), members: new Map(), log: new Map(), meta: new Map(), schedules: new Map(), holidays: new Map(), work: new Map(), away: new Map(), events: new Map(), dinners: new Map(), outings: new Map(), awayReasons: new Map(), deviceAsks: new Map(), dinnerTasks: new Map(), nights: new Map(), nightTypes: new Map(), shop: new Map(), trips: new Map(), reviews: new Map(), chat: new Map(), shifts: new Map() };
-const COLLS = ['rooms', 'chores', 'members', 'log', 'meta', 'schedules', 'holidays', 'work', 'away', 'outings', 'awayReasons', 'deviceAsks', 'events', 'dinners', 'dinnerTasks', 'nights', 'nightTypes', 'shop', 'trips', 'reviews', 'chat', 'shifts'];
+const S = { rooms: new Map(), chores: new Map(), members: new Map(), log: new Map(), meta: new Map(), schedules: new Map(), holidays: new Map(), work: new Map(), away: new Map(), events: new Map(), dinners: new Map(), outings: new Map(), awayReasons: new Map(), deviceAsks: new Map(), dinnerTasks: new Map(), nights: new Map(), nightTypes: new Map(), shop: new Map(), pay: new Map(), trips: new Map(), reviews: new Map(), chat: new Map(), shifts: new Map() };
+const COLLS = ['rooms', 'chores', 'members', 'log', 'meta', 'schedules', 'holidays', 'work', 'away', 'outings', 'awayReasons', 'deviceAsks', 'events', 'dinners', 'dinnerTasks', 'nights', 'nightTypes', 'shop', 'pay', 'trips', 'reviews', 'chat', 'shifts'];
 const GROUPS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 let ready = false, signedOut = false, slowNote = false, me = null, logins = {}, withSignIn = [], everyoneIds = [], levels = {}, birthdays = {}, lastDoneInfo = {}, sick = {}, nightGroups = [], changes = [], stream = null, appVersion = '', newVersion = '', reminder = null, reminderTimer = null;
 const pref = (k, v) => { try { if (v === undefined) return localStorage.getItem('rota-' + k); localStorage.setItem('rota-' + k, v); } catch (e) { return null; } };
-let who = pref('who') || 'all', weekStart = null;
+let who = pref('who') || 'all', whoChosen = !!pref('who'), weekStart = null;
 
 async function call(method, url, body) {
   const res = await fetch('api/' + url, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Rota': '1' }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -122,6 +122,7 @@ function applyState(st) {
   if (!pushInfo) setTimeout(loadPush);
   if (st.version) { if (!appVersion) appVersion = st.version; else if (st.version !== appVersion) newVersion = st.version; }
   queueReminders();
+  if (!whoChosen && me.admin && S.members.has(me.id)) { who = me.id; whoChosen = true; }
   if (who !== 'all' && (!S.members.has(who) || !me.admin)) who = 'all';
   ready = true; signedOut = false; slowNote = false;
   scheduleRender();
@@ -369,11 +370,19 @@ function scheduleRender() { if (renderQueued) return; renderQueued = true; reque
 const main = document.getElementById('main');
 /* In cleaner mode there's no System tab; switching to Admin mode brings it back. */
 const showSystem = () => !!(me && me.system && !(me.canSwitch && me.mode === 'cleaner'));
-function scheduleNav(page) {
-  const link = (id, label) => `<a class="pill" href="#${id}" data-sub="${id}" ${page === id ? 'aria-current="page"' : ''}>${label}</a>`;
-  return `<nav class="pills sub-nav" aria-label="Schedule">${link('school', 'Schedule')}${link('dinner', 'Dinner')}${link('fun', 'Entertainment')}</nav>`;
+/* Six top tabs. Each page belongs to one of them; pages in the same tab share a row of pills. */
+const TOP_OF = { today: 'today', week: 'plan', school: 'plan', dinner: 'plan', fun: 'plan', rooms: 'jobs', progress: 'jobs', extra: 'jobs', shop: 'shop', chat: 'chat', settings: 'settings', logs: 'settings', system: 'settings' };
+function subNav(label, page, links) {
+  const link = ([id, text]) => `<a class="pill" href="#${id}" data-sub="${id}" ${page === id ? 'aria-current="page"' : ''}>${text}</a>`;
+  return `<nav class="pills sub-nav" aria-label="${label}">${links.map(link).join('')}</nav>`;
 }
-const tabName = () => { const h = location.hash.slice(1); if (h === 'system' && !showSystem()) return 'today'; if (h === 'logs' && !(me && me.admin)) return 'today'; return ['today', 'week', 'rooms', 'progress', 'school', 'dinner', 'fun', 'extra', 'chat', 'shop', 'logs', 'system'].includes(h) ? h : 'today'; };
+const planNav = page => subNav('Calendar', page, [['week', 'Week'], ['school', 'Schedule'], ['dinner', 'Dinner'], ['fun', 'Nights in']]);
+const jobsNav = page => subNav('Jobs', page, [['rooms', 'Rooms'], ['progress', 'Progress'], ...(me && (me.cleaner || me.admin) ? [['extra', 'Extra time']] : [])]);
+const settingsNav = page => { const l = [['settings', 'Settings'], ...(me && me.admin ? [['logs', 'Logs']] : []), ...(showSystem() ? [['system', 'System']] : [])]; return l.length > 1 ? subNav('Settings', page, l) : ''; };
+/* Things only an admin can answer: extra time requests and redone chores to check. Shown on Today and counted on its tab. */
+const payWaiting = () => [...S.pay.values()].filter(p => p.status === 'pending' && !p.snoozeUntil).sort((a, b) => a.week.localeCompare(b.week) || memberName(a.memberId).localeCompare(memberName(b.memberId)));
+const needsYouCount = () => !me || !me.admin ? 0 : [...S.deviceAsks.values()].filter(q => !q.answer).length + S.reviews.size + payWaiting().length;
+const tabName = () => { const h = location.hash.slice(1); if (h === 'system' && !showSystem()) return 'today'; if (h === 'logs' && !(me && me.admin)) return 'today'; if (h === 'extra' && !(me && (me.cleaner || me.admin))) return 'today'; return Object.keys(TOP_OF).includes(h) ? h : 'today'; };
 const TICK = '<svg viewBox="0 0 24 24" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 13l4 4L19 7"/></svg>';
 
 let lastTab = null;
@@ -386,13 +395,11 @@ function render() {
   const focusKey = active && active.dataset ? active.dataset.fk : null;
   const authed = !signedOut && !!me;
   document.getElementById('nav').hidden = !authed;
-  document.getElementById('add-btn').hidden = !authed || !me.admin || tabName() !== 'school';
+  document.getElementById('add-btn').hidden = !authed || !me.admin || tabName() !== 'rooms';
   document.body.classList.toggle('not-admin', !me || !me.admin);
-  document.querySelector('[data-tab="system"]').hidden = !showSystem();
-  document.querySelector('[data-tab="logs"]').hidden = !(me && me.admin);
   document.querySelector('[data-tab="chat"]').hidden = !authed;
   document.querySelector('[data-tab="shop"]').hidden = !authed;
-  document.querySelector('[data-tab="extra"]').hidden = !(authed && (me.cleaner || me.admin));
+  { const n = authed ? needsYouCount() : 0, b = document.getElementById('today-badge'); b.hidden = !n; b.textContent = n || ''; }
   document.getElementById('whats-new').hidden = !authed;
   const sw = document.getElementById('mode-switch');
   sw.hidden = !(authed && me.canSwitch);
@@ -400,7 +407,7 @@ function render() {
   updateChatBadge();
   if (signedOut) { main.innerHTML = signInHTML(); loadWhatsOn(); return; }
   const tab = tabName();
-  document.querySelectorAll('#tabs a').forEach(a => { if (a.dataset.tab === (['dinner', 'fun'].includes(tab) ? 'school' : tab)) { if (a.getAttribute('aria-current') !== 'page') { const t = document.getElementById('tabs'); t.scrollLeft = a.offsetLeft - t.offsetLeft - (t.clientWidth - a.offsetWidth) / 2; } a.setAttribute('aria-current', 'page'); } else a.removeAttribute('aria-current'); });
+  document.querySelectorAll('#tabs a').forEach(a => { if (a.dataset.tab === TOP_OF[tab]) { if (a.getAttribute('aria-current') !== 'page') { const t = document.getElementById('tabs'); t.scrollLeft = a.offsetLeft - t.offsetLeft - (t.clientWidth - a.offsetWidth) / 2; } a.setAttribute('aria-current', 'page'); } else a.removeAttribute('aria-current'); });
   if (tab === 'chat') markChatRead();
   const empty = !S.rooms.size && !S.chores.size;
   if (empty) document.getElementById('add-btn').hidden = true;
@@ -409,7 +416,7 @@ function render() {
   if (choreTab && empty) { main.innerHTML = me.admin ? setupHTML(true) : `<div class="empty">Your household admin hasn't set up the planner yet.</div>`; return; }
   /* Redraw without moving the page: ticking a job moves it to another list, and focusing its new spot used to jump the screen down. */
   const keepY = window.scrollY;
-  main.innerHTML = banners() + ({ today: viewToday, week: viewWeek, rooms: viewRooms, progress: viewProgress, school: viewSchool, dinner: viewDinner, fun: viewFun, extra: viewExtra, chat: viewChat, shop: viewShop, logs: viewLogs, system: viewSystem }[tab])();
+  main.innerHTML = banners() + ({ today: viewToday, week: viewWeek, rooms: viewRooms, progress: viewProgress, school: viewSchool, dinner: viewDinner, fun: viewFun, extra: viewExtra, chat: viewChat, shop: viewShop, logs: () => settingsNav('logs') + viewLogs(), system: () => settingsNav('system') + viewSystem(), settings: viewSettings }[tab])();
   if (focusKey) main.querySelector(`[data-fk="${CSS.escape(focusKey)}"]`)?.focus({ preventScroll: true });
   if (tab === lastTab && Math.abs(window.scrollY - keepY) > 1) window.scrollTo(0, keepY);
   lastTab = tab;
@@ -419,14 +426,11 @@ function banners() {
   if (slowNote) h += `<div class="notice"><span>Can't reach the server right now. What you see may be out of date.</span></div>`;
   if (newVersion) h += `<div class="notice update-bar"><span><b>A new version is ready.</b> Update when you've finished what you're doing.</span><button class="btn small primary" data-a="app-update">Update</button></div>`;
   if (me && !me.admin && isBirthday(me.id, localToday())) h += '<div class="notice clocked"><span><b>Happy birthday!</b> You have no jobs today.</span></div>';
-  if (me && me.admin && S.reviews.size && tabName() !== 'today') h += `<div class="notice"><span><b>${S.reviews.size} redone ${S.reviews.size === 1 ? 'chore' : 'chores'}</b> waiting for your check.</span><a class="btn small" href="#today">Check now</a></div>`;
   if (me && sickUntil(me.id)) h += `<div class="notice clocked"><span><b>Get well soon.</b> Your chores are paused until ${esc(stampText(sickUntil(me.id)))}.</span></div>`;
-  { const waiting = me && me.admin ? [...S.deviceAsks.values()].filter(q => !q.answer).length : 0;
-    if (waiting && tabName() !== 'extra') h += `<div class="notice ask-notice"><span><b>${waiting} ${waiting === 1 ? 'request' : 'requests'} for extra time</b> waiting for an answer.</span><a class="btn small" href="#extra">See</a></div>`; }
   h += dinnerBanner();
   const trip = me && tripOn(localToday());
   if (trip) h += `<div class="notice trip"><span><b>Family holiday: ${esc(trip.name)}.</b> No schedule or alerts until you're back on ${esc(fmtShort(afterTrips(localToday())))}.</span></div>`;
-  h += reminderHTML();
+  if (tabName() === 'today') h += reminderHTML();
   return h;
 }
 function reminderHTML() {
@@ -494,6 +498,46 @@ function openExtraJob() {
     <div class="actions"><button type="button" class="btn" data-a="close">Cancel</button><button class="btn primary">Save</button></div></form>`);
   document.getElementById('xj-text').focus();
 }
+/* Adults looking at everyone's jobs get the late list folded away once it's long; your own late jobs always show. */
+const lateOpen = n => !me.admin || who !== 'all' || n <= 5;
+function needsYouHTML() {
+  if (!me.admin) return '';
+  const asks = [...S.deviceAsks.values()].filter(q => !q.answer).sort((a, b) => a.at - b.at), pay = payWaiting();
+  if (!asks.length && !pay.length) return '';
+  const what = [pay.length ? 'pocket money' : '', asks.length ? `extra time ${asks.length === 1 ? 'request' : 'requests'}` : ''].filter(Boolean).join(' and ');
+  return `<section class="group needs-you"><h2>Needs you <small>${what}</small></h2><ul class="rows shifts">${pay.map(payRow).join('')}${asks.map(askRow).join('')}</ul></section>`;
+}
+const money = n => `£${(Math.round((+n || 0) * 100) / 100).toFixed(2)}`;
+const hrsMin = m => { const h = Math.floor(m / 60), r = Math.round(m % 60); return h ? `${h} h${r ? ` ${r} min` : ''}` : `${r} min`; };
+const payWeek = p => `${fmt(p.week, { day: 'numeric', month: 'short' })} to ${fmt(addDays(p.week, 6), { day: 'numeric', month: 'short' })}`;
+function payBreakdown(p) {
+  return [`${p.jobs} ${p.jobs === 1 ? 'job' : 'jobs'}, ${hrsMin(p.minutes)} × ${money(p.rate)} an hour = ${money(p.earned)}`,
+    p.extraMinutes ? `includes ${hrsMin(p.extraMinutes)} of extra jobs` : '',
+    p.bedroom ? `${p.bedroom} own-bedroom ${p.bedroom === 1 ? 'job' : 'jobs'} not paid` : '',
+    p.returned ? `${p.returned} sent back × ${Math.round(p.fee * 100)}p = −${money(p.returned * p.fee)}${p.returnedTitles && p.returnedTitles.length ? ` (${p.returnedTitles.join(', ')})` : ''}` : '',
+    `Suggested ${money(p.suggested)}${p.amount !== p.suggested ? `, changed to ${money(p.amount)}${p.editedBy ? ` by ${p.editedBy}` : ''}` : ''}`].filter(Boolean);
+}
+function payRow(p) {
+  return `<li class="shift pay-row"><div class="dinner-text"><b>💷 ${esc(memberName(p.memberId))}: ${esc(money(p.amount))}</b><span class="row-meta">Pocket money for ${esc(payWeek(p))}</span>
+    <ul class="pay-lines">${payBreakdown(p).map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>
+    <div class="pills"><button class="btn small primary" data-a="pay-ok" data-id="${esc(p.id)}">Approve</button><button class="btn small" data-a="pay-snooze" data-id="${esc(p.id)}">Snooze</button><button class="btn small" data-a="pay-edit" data-id="${esc(p.id)}">Edit</button></div></li>`;
+}
+function openPayEdit(id) {
+  const p = S.pay.get(id); if (!p) return;
+  openSheet(`<form id="pay-form" data-id="${esc(id)}"><h2 id="sheet-title">${esc(memberName(p.memberId))}'s pocket money</h2><p class="hint">${esc(payWeek(p))}. ${esc(payBreakdown(p).join('. '))}.</p>
+    <div class="field"><label class="lab" for="pay-amount">Amount (£)</label><input type="number" id="pay-amount" min="0" max="500" step="0.01" required value="${esc((+p.amount).toFixed(2))}"></div>
+    <p class="form-error" id="pay-error" role="alert" hidden></p>
+    <div class="actions"><button type="button" class="btn" data-a="close">Cancel</button><button type="submit" class="btn" name="go" value="save">Save</button><button type="submit" class="btn primary" name="go" value="approve">Save and approve</button></div></form>`);
+  document.getElementById('pay-amount').select();
+}
+/* Everyone's pocket money, newest first (children see their own approved weeks). */
+function payHistoryHTML() {
+  const list = [...S.pay.values()].filter(p => me.admin || p.memberId === me.id).sort((a, b) => b.week.localeCompare(a.week) || memberName(a.memberId).localeCompare(memberName(b.memberId))).slice(0, 16);
+  if (!list.length) return '';
+  const state = p => p.status === 'approved' ? `Approved by ${esc(p.approvedBy || 'an adult')}` : p.snoozeUntil ? 'Snoozed' : 'Waiting for an adult';
+  return `<h2 class="sec" style="margin-top:28px">Pocket money</h2><ul class="mini">${list.map(p => `<li><span>${me.admin ? `${esc(memberName(p.memberId))}, ` : ''}${esc(payWeek(p))}<small class="row-meta" style="display:block">${state(p)}</small></span><span><b>${esc(money(p.amount))}</b></span></li>`).join('')}</ul>
+    <p class="hint">${esc(money(list[0].rate || 4))} an hour of jobs, minus ${Math.round((list[0].fee || 0.25) * 100)}p for each job sent back. Jobs in your own bedroom aren't paid. Worked out every Friday at 5pm for the week before.</p>`;
+}
 function reviewsHTML() {
   if (!me.admin || !S.reviews.size) return '';
   const list = [...S.reviews.values()].sort((a, b) => a.at - b.at);
@@ -528,8 +572,8 @@ function viewToday() {
     <div class="hero"><h1>${esc(fmt(today, { weekday: 'long', day: 'numeric', month: 'long' }))}</h1><p>${sub}</p>
       <div class="towel" role="img" aria-label="${listDone} of ${total} done today"><span style="width:${pct}%"></span></div></div>
     <div class="filters">${peopleFilter()}</div>
-    ${reviewsHTML()}
-    ${group('late', 'Late', late.length + ' waiting', late)}
+    ${needsYouHTML()}${reviewsHTML()}
+    ${late.length ? `<details class="group late fold" ${lateOpen(late.length) ? 'open' : ''}><summary><h2>Late <small>${late.length} waiting</small></h2></summary><ul class="rows">${late.map(c => row(c, today)).join('')}</ul></details>` : ''}
     ${group('', 'Today', now.length ? '' : '', now)}
     ${group('', 'Next 7 days', 'tick early if you get ahead', soon)}
     ${!late.length && !now.length && !soon.length ? `<div class="empty">Nothing in this view.${next ? ` Next up: ${esc(next.title)} on ${esc(fmtShort(next.due))}.` : ''}</div>` : ''}
@@ -598,18 +642,36 @@ function viewWeek() {
     const list = items[d].sort((a, b) => (a.c.time || '99').localeCompare(b.c.time || '99') || a.c.title.localeCompare(b.c.title));
     const mins = list.reduce((s, x) => s + (x.c.minutes || 0), 0); total += mins;
     return `<div class="day ${d === today ? 'today' : ''}"><div class="day-head"><b>${esc(fmt(d, { weekday: 'short' }))} ${toD(d).getUTCDate()}</b><span>${mins ? esc(fmtMins(mins)) : ''}</span></div>
-      ${weekEvents(d)}${weekSchool(d)}
+      ${weekEvents(d)}${weekDinner(d)}${weekSchool(d)}
       ${(done[d] || []).map(l => `<div class="chip done">${esc(l.title)}</div>`).join('')}
       ${list.map(x => `<button class="chip ${x.late ? 'late' : ''}" data-a="edit" data-id="${esc(x.c.id)}">${esc(x.c.title)}<small>${x.late ? 'Late · ' : ''}${x.c.time ? esc(x.c.time) + ' · ' : ''}${esc(fmtMins(x.c.minutes || 0))}${memberName(x.c.assignee) ? ' · ' + esc(memberName(x.c.assignee)) : ''}</small></button>`).join('')}
-      <button class="day-add" data-a="new" data-date="${d}">+ Add</button></div>`;
+      <button class="day-add" data-a="add-pick" data-date="${d}">+ Add</button></div>`;
   }).join('');
-  return `<div class="page-head"><div><h1>${esc(label)}</h1><p>About ${esc(fmtMins(total))} of housework planned.</p></div>
+  return `${planNav('week')}<div class="page-head"><div><h1>${esc(label)}</h1><p>Everything on, plus about ${esc(fmtMins(total))} of housework.</p></div>
     <div class="pills"><button class="btn" data-a="wk" data-id="-7" data-fk="wk-prev">Previous</button><button class="btn" data-a="wk" data-id="0" data-fk="wk-now">This week</button><button class="btn" data-a="wk" data-id="7" data-fk="wk-next">Next</button></div></div>
     <div class="filters">${peopleFilter()}</div><div class="week">${days}</div>`;
 }
 function weekEvents(d) {
   const bd = members().filter(m => isBirthday(m.id, d) && (me.admin || m.id === me.id)).map(m => `<div class="chip event">${esc(m.name)}'s birthday</div>`).join('');
   return bd + [...S.events.values(), ...linkedEvents()].filter(e => eventDateFrom(e, d) === d).map(e => `<button class="chip event" data-a="event-open" data-id="${esc(e.id)}">${esc(e.title)}${e.time ? `<small>${esc(e.time)}</small>` : ''}</button>`).join('');
+}
+function weekDinner(d) {
+  const din = S.dinners.get(d);
+  if (!din || din.kind === 'takeaway' || din.kind === 'out' || !dinnerPlanned(din)) return '';
+  const t = `${esc(dinnerText(din).title)}<small>Dinner</small>`;
+  return me.admin ? `<button class="chip dinner" data-a="dinner-open" data-id="${esc(d)}">${t}</button>` : `<div class="chip dinner">${t}</div>`;
+}
+/* One "+ Add" for the whole calendar: pick what it is, then the usual form opens on that day. */
+function openAddPicker(date) {
+  const opt = (a, label, hint) => `<button type="button" class="add-opt" data-a="${a}" data-date="${esc(date)}"><b>${label}</b><span>${hint}</span></button>`;
+  openSheet(`<div><h2 id="sheet-title">Add to ${esc(fmt(date, { weekday: 'long', day: 'numeric', month: 'short' }))}</h2><div class="add-opts">
+    ${me.admin ? opt('new', 'Chore', 'A job for someone') : ''}
+    ${opt('event-new', 'Reminder', 'Birthdays, appointments, bins')}
+    ${opt('out-new', 'Activity', 'Someone is out (club, work, friends)')}
+    ${canAddNight() ? opt('night-new', 'Night in', 'Film night, games, takeaway') : ''}
+    ${me.admin ? opt('dinner-new', 'Dinner', "What we're eating") : ''}
+    ${me.admin ? opt('work-open', 'Work shift', 'Hours at work') : ''}
+  </div><div class="actions"><button type="button" class="btn" data-a="close">Cancel</button></div></div>`);
 }
 function weekSchool(d) {
   const trip = tripOn(d);
@@ -633,7 +695,8 @@ function lastDoneText(last) {
   const today = localToday(), when = last.date === today ? 'today' : last.date === addDays(today, -1) ? 'yesterday' : `on ${fmtShort(last.date)}`;
   return `Last done ${when}${last.stamp ? ` at ${clockTime(last.stamp)}` : ''}${memberName(last.by) ? ` by ${memberName(last.by)}` : ''}`;
 }
-function viewRooms() {
+function viewRooms() { return jobsNav('rooms') + viewRoomsBody(); }
+function viewRoomsBody() {
   const today = localToday();
   const all = allChores().map(effective); const monthly = all.reduce((s, c) => s + perMonth(c), 0);
   const doneBy = c => c.everyone ? ((c.people || []).length ? c.people.map(memberName).filter(Boolean).join(', ') : 'Everyone') : memberName(c.assignee) || (c.anyLevel ? `Anyone in: ${levelNames(c.anyLevel) || 'nobody yet'}` : 'Anyone');
@@ -666,7 +729,7 @@ function viewProgress() {
   const roomsDone = new Set(all.filter(l => l.date >= week).map(l => l.roomId));
   const everyRoom = rooms().length > 0 && rooms().every(r => roomsDone.has(r.id));
   const badges = [['First tick', 'Finish a chore', all.length >= 1], ['Week strong', '7 days in a row', s.best >= 7], ['Habit formed', '30 days in a row', s.best >= 30], ['Fifty down', 'Finish 50 chores', all.length >= 50], ['Spring clean', 'Every room this week', everyRoom], ['House proud', 'Finish 250 chores', all.length >= 250]];
-  return `<div class="page-head"><div><h1>Progress</h1><p>Who's done what since Monday, and how long you've kept it up.</p></div></div>
+  return `${jobsNav('progress')}<div class="page-head"><div><h1>Progress</h1><p>Who's done what since Monday, and how long you've kept it up.</p></div></div>
   <div class="stats" style="grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:28px">
     <div class="stat"><b>${s.current}</b><span>day streak</span></div><div class="stat"><b>${s.best}</b><span>best streak</span></div><div class="stat"><b>${esc(fmtMins(thisWeek).replace(' min', 'm'))}</b><span>this week</span></div></div>
   <div class="cols"><div>
@@ -674,13 +737,10 @@ function viewProgress() {
     ${bars.length ? bars.map(([id, v]) => `<div class="bar-row"><span>${esc(id ? memberName(id) : 'Not credited')}</span><div class="bar"><span style="width:${v / max * 100}%"></span></div><span>${esc(fmtMins(v))}</span></div>`).join('') : '<p class="empty">Add people below to see who did what.</p>'}
     <h2 class="sec" style="margin-top:28px">Badges</h2>
     <ul class="badges">${badges.map(([t, d, w]) => `<li class="badge ${w ? 'won' : ''}"><b>${t}</b>${d}</li>`).join('')}</ul>
+    ${payHistoryHTML()}
   </div><div>
-    <h2 class="sec">Household</h2>
-    ${householdHTML()}
-    ${me.admin ? groupsQuickHTML() : ''}
-    <h2 class="sec" style="margin-top:28px">Recently done</h2>
+    <h2 class="sec">Recently done</h2>
     ${all.length ? `<ul class="mini">${all.slice(0, 12).map(l => `<li><span>${esc(l.title)}${memberName(l.by) ? ' · ' + esc(memberName(l.by)) : ''}</span><span>${esc(fmt(l.date, { day: 'numeric', month: 'short' }))}</span></li>`).join('')}</ul>` : '<p class="empty">Nothing ticked off yet.</p>'}
-    ${accountHTML()}
   </div></div>`;
 }
 /* Quick group setup: everyone with a cleaner sign-in against the groups, one tick box each. Saves as soon as a box changes. */
@@ -790,12 +850,8 @@ const nightRow = n => `<li class="shift night-row"><span class="night-icon" aria
 function viewFun() {
   const list = upcomingNights();
   const types = [...S.nightTypes.values()].sort((a, b) => a.name.localeCompare(b.name));
-  const admin = !me.admin ? '' : `<h2 class="sec" style="margin-top:32px">Options</h2><ul class="rows shifts">${types.map(t => `<li class="shift night-row"><span class="night-icon" aria-hidden="true">${esc(t.icon)}</span><div class="dinner-text"><b>${esc(t.name)}</b></div><button class="btn small" data-a="nt-del" data-id="${esc(t.id)}" aria-label="Remove ${esc(t.name)}">Remove</button></li>`).join('')}</ul>
-    <form id="nt-form" class="member" style="margin-top:12px"><select id="nt-icon" aria-label="Icon">${NIGHT_ICONS.map(i => `<option value="${i}">${i}</option>`).join('')}</select><input type="text" id="nt-name" maxlength="40" placeholder="Add an option" aria-label="Add an option" autocomplete="off"><button class="btn primary">Add</button></form>
-    <h2 class="sec" style="margin-top:32px">Who can add nights</h2><p class="hint">Admins always can. Tick the groups that can too.</p>
-    <div class="checks night-groups">${GROUPS.filter(n => (levels[n] || []).length || nightGroups.includes(n)).map(n => `<label class="inline-check"><input type="checkbox" data-nightgroup="${n}" ${nightGroups.includes(n) ? 'checked' : ''}> Group ${n}: ${esc(levelNames(n) || 'nobody yet')}</label>`).join('') || '<p class="empty">No groups have people in them yet.</p>'}</div>`;
-  return `${scheduleNav('fun')}<div class="page-head"><div><h1>Entertainment</h1><p>Nights coming up.</p></div>${canAddNight() ? '<button class="btn primary" data-a="night-new">Add a night</button>' : ''}</div>
-    ${list.length ? `<ul class="rows shifts">${list.map(nightRow).join('')}</ul>` : '<p class="empty">Nothing planned yet.</p>'}${admin}`;
+  return `${planNav('fun')}<div class="page-head"><div><h1>Nights in</h1><p>Nights coming up.</p></div>${canAddNight() ? '<button class="btn primary" data-a="night-new">Add a night</button>' : ''}</div>
+    ${list.length ? `<ul class="rows shifts">${list.map(nightRow).join('')}</ul>` : '<p class="empty">Nothing planned yet.</p>'}`;
 }
 function openNight(n) {
   const today = localToday(), types = [...S.nightTypes.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -840,8 +896,7 @@ function viewSchool() {
   for (const w of workShifts()) if (w.date >= week && w.date <= weekEnd) hours.set(w.memberId, (hours.get(w.memberId) || 0) + workMins(w));
   const workRows = shown.map(w => `<li class="shift"><div><b>${esc(memberName(w.memberId))}</b>${w.note ? ` · ${esc(w.note)}` : ''}<span class="row-meta">${esc(fmtShort(w.date))}, ${esc(w.start)} to ${esc(workEnd(w))} · ${esc(fmtMins(workMins(w)))}</span></div>${me.admin ? `<button class="btn small" data-a="work-open" data-id="${esc(w.id)}">Edit</button>` : ''}</li>`).join('');
   const awayRows = listedAway().filter(a => a.to >= today).sort((a, b) => a.from < b.from ? -1 : 1).map(a => `<li class="shift"><div><b>${esc(memberName(a.memberId))}</b> · ${esc(awayReason(a))}<span class="row-meta">${esc(fmtShort(a.from))}${a.from === a.to ? '' : ` to ${esc(fmtShort(a.to))}`} · ${sameDayAway(a) ? `leaves ${esc(a.leave)}, back ${esc(a.back)}` : a.allDay === false ? `leaves ${esc(a.leave)}, back ${esc(a.back)} on ${esc(fmtShort(addDays(a.to, 1)))}` : 'All day'} · Chores go to each chore's second person, or move to the next day</span></div>${me.admin ? `<button class="btn small" data-a="away-open" data-id="${esc(a.id)}">Edit</button>` : ''}</li>`).join('');
-  return `${scheduleNav('school')}<div class="page-head"><div><h1>Schedule</h1><p>Work shifts, school times, holidays and entertainment.</p></div></div>
-    ${nightList.length ? `<h2 class="sec">Entertainment</h2><ul class="rows shifts" style="margin-bottom:32px">${nightList.map(nightRow).join('')}</ul>` : ''}
+  return `${planNav('school')}<div class="page-head"><div><h1>Schedule</h1><p>Work shifts, off sick, activities, school times and holidays.</p></div></div>
     <div class="page-head"><div><h2 class="sec" style="margin:0">${me.admin ? 'Work shifts' : 'Your work shifts'}</h2></div>${me.admin ? '<button class="btn primary" data-a="work-open">Log a shift</button>' : ''}</div>
     ${calendarHTML()}
     ${[...hours.entries()].map(([id, v]) => `<p class="hint">${esc(memberName(id))}: ${esc(fmtMins(v))} this week</p>`).join('')}
@@ -849,8 +904,6 @@ function viewSchool() {
     ${me.admin ? `<div class="page-head"><div><h2 class="sec" style="margin:0">Off sick</h2></div><button class="btn primary" data-a="sick-new">Log someone sick</button></div>${sickRows ? `<ul class="rows shifts" style="margin-bottom:32px">${sickRows}</ul>` : '<p class="empty">Nobody is off sick.</p>'}` : ''}
     <div class="page-head"><div><h2 class="sec" style="margin:0">${me.admin ? 'Activities' : 'Your activities'}</h2><p class="hint">These show in Who is out today.</p></div><button class="btn primary" data-a="out-open">Add an activity</button></div>
     ${awayRows || outRows ? `<ul class="rows shifts" style="margin-bottom:32px">${awayRows}${outRows}</ul>` : '<p class="empty">No activities yet.</p>'}
-    ${me.admin ? `<h2 class="sec">Suggested activities</h2><div class="reason-list">${[...S.awayReasons.values()].map(r => `<div class="member"><input type="text" id="ar-${esc(r.id)}" maxlength="40" value="${esc(r.name)}" aria-label="Reason"><button class="btn" data-a="ar-save" data-id="${esc(r.id)}" aria-label="Save ${esc(r.name)}">Save</button><button class="btn" data-a="ar-del" data-id="${esc(r.id)}" aria-label="Remove ${esc(r.name)}">Remove</button></div>`).join('')}</div>
-    <form id="ar-form" class="member" style="margin:8px 0 32px"><input type="text" id="ar-new" maxlength="40" placeholder="Add a suggestion" aria-label="Add a suggestion" autocomplete="off"><button class="btn primary">Add</button></form>` : ''}
     <h2 class="sec">${me.admin ? 'School and college' : 'Your school or college'}</h2><p class="hint" style="margin-bottom:12px">Times don't show during a school or family holiday.</p>
     ${cards ? `<div class="room-grid">${cards}</div>` : `<p class="empty">${me.admin ? 'No school or college times have been set.' : 'You have no school or college times.'}</p>`}
     <div class="page-head" style="margin-top:12px"><div><h2 class="sec" style="margin:0">Family holidays</h2><p class="hint" style="margin:2px 0 0">Everyone is away and nobody is home: no schedule or alerts, and chores wait until you're back.</p></div>${me.admin ? '<button class="btn primary" data-a="trip-open">Add family holiday</button>' : ''}</div>
@@ -980,6 +1033,24 @@ function downloadReport() {
   a.download = `family-planner-${(memberName(logsWho) || 'person').replace(/[^A-Za-z0-9]+/g, '-')}-last-14-days.csv`;
   document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
+/* Settings: the setup that used to be spread over Progress, Schedule and Entertainment. */
+function viewSettings() {
+  const types = [...S.nightTypes.values()].sort((a, b) => a.name.localeCompare(b.name));
+  return `${settingsNav('settings')}<div class="page-head"><div><h1>Settings</h1><p>${me.admin ? 'People, groups, lists and your account.' : 'Your account and this device.'}</p></div></div>
+  <div class="cols"><div>
+    <h2 class="sec">Household</h2>
+    ${householdHTML()}
+    ${me.admin ? groupsQuickHTML() : ''}
+  </div><div>
+    ${me.admin ? `<div class="settings-block"><h2 class="sec">Suggested activities</h2><p class="hint">Offered when someone adds an activity.</p><div class="reason-list">${[...S.awayReasons.values()].map(r => `<div class="member"><input type="text" id="ar-${esc(r.id)}" maxlength="40" value="${esc(r.name)}" aria-label="Reason"><button class="btn" data-a="ar-save" data-id="${esc(r.id)}" aria-label="Save ${esc(r.name)}">Save</button><button class="btn" data-a="ar-del" data-id="${esc(r.id)}" aria-label="Remove ${esc(r.name)}">Remove</button></div>`).join('')}</div>
+    <form id="ar-form" class="member" style="margin:8px 0 32px"><input type="text" id="ar-new" maxlength="40" placeholder="Add a suggestion" aria-label="Add a suggestion" autocomplete="off"><button class="btn primary">Add</button></form></div>` : ''}
+    ${me.admin ? `<div class="settings-block"><h2 class="sec">Nights in options</h2><ul class="rows shifts">${types.map(t => `<li class="shift night-row"><span class="night-icon" aria-hidden="true">${esc(t.icon)}</span><div class="dinner-text"><b>${esc(t.name)}</b></div><button class="btn small" data-a="nt-del" data-id="${esc(t.id)}" aria-label="Remove ${esc(t.name)}">Remove</button></li>`).join('')}</ul>
+    <form id="nt-form" class="member" style="margin-top:12px"><select id="nt-icon" aria-label="Icon">${NIGHT_ICONS.map(i => `<option value="${i}">${i}</option>`).join('')}</select><input type="text" id="nt-name" maxlength="40" placeholder="Add an option" aria-label="Add an option" autocomplete="off"><button class="btn primary">Add</button></form>
+    <h2 class="sec" style="margin-top:32px">Who can add nights</h2><p class="hint">Admins always can. Tick the groups that can too.</p>
+    <div class="checks night-groups">${GROUPS.filter(n => (levels[n] || []).length || nightGroups.includes(n)).map(n => `<label class="inline-check"><input type="checkbox" data-nightgroup="${n}" ${nightGroups.includes(n) ? 'checked' : ''}> Group ${n}: ${esc(levelNames(n) || 'nobody yet')}</label>`).join('') || '<p class="empty">No groups have people in them yet.</p>'}</div></div>` : ''}
+    ${accountHTML()}
+  </div></div>`;
+}
 function viewLogs() {
   if (!logsData) { loadLogs(); return '<div class="empty">Loading the logs…</div>'; }
   if (logsData.error) return `<div class="empty">${esc(logsData.error)}</div>`;
@@ -1039,7 +1110,7 @@ function viewDinner() {
     const trip = tripOn(d.id), t = dinnerText(d);
     return `<li class="shift dinner-day"><div class="dinner-text"><span class="row-meta">${d.id === today ? 'Tonight' : esc(fmtShort(d.id))}</span><b>${esc(t.title)}</b>${t.who ? `<span class="row-meta">${esc(t.who)}</span>` : ''}${trip ? `<span class="row-meta">Family holiday: ${esc(trip.name)}</span>` : ''}${dinnerTaskRows(d.id)}</div>${me.admin ? `<div class="pills dinner-btns"><button class="btn small" data-a="dtask-new" data-id="${esc(d.id)}" aria-label="Add a reminder for dinner on ${esc(fmtShort(d.id))}">Add reminder</button><button class="btn small" data-a="dinner-open" data-id="${esc(d.id)}" aria-label="Edit dinner for ${esc(fmtShort(d.id))}">Edit</button></div>` : ''}</li>`;
   }).join('');
-  return `${scheduleNav('dinner')}<div class="page-head"><div><h1>Dinner</h1><p>What's planned.</p></div>${me.admin ? '<button class="btn primary" data-a="dinner-new">Add dinner</button>' : ''}</div>${rows ? `<ul class="rows shifts">${rows}</ul>` : '<p class="empty">No dinners planned yet.</p>'}`;
+  return `${planNav('dinner')}<div class="page-head"><div><h1>Dinner</h1><p>What's planned.</p></div>${me.admin ? '<button class="btn primary" data-a="dinner-new">Add dinner</button>' : ''}</div>${rows ? `<ul class="rows shifts">${rows}</ul>` : '<p class="empty">No dinners planned yet.</p>'}`;
 }
 function dinnerTaskRows(dinner) {
   const list = [...S.dinnerTasks.values()].filter(t => t.dinner === dinner).sort((a, b) => a.date < b.date ? -1 : 1);
@@ -1078,8 +1149,8 @@ function askRow(q) {
 function viewExtra() {
   const list = [...S.deviceAsks.values()].sort((a, b) => (!a.answer - !b.answer) * -1 || b.at - a.at);
   const asks = list.length ? `<ul class="rows shifts">${list.map(askRow).join('')}</ul>` : `<p class="empty">${me.admin ? 'No requests yet.' : 'You have not asked yet.'}</p>`;
-  if (me.admin) return `<div class="page-head"><div><h1>Extra time</h1><p>Requests from the last 14 days.</p></div></div>${asks}`;
-  return `<div class="page-head"><div><h1>Extra time</h1><p>Which device do you want extra time on? An admin will see the jobs you've done in the last 12 hours.</p></div></div>
+  if (me.admin) return `${jobsNav('extra')}<div class="page-head"><div><h1>Extra time</h1><p>Requests from the last 14 days.</p></div></div>${asks}`;
+  return `${jobsNav('extra')}<div class="page-head"><div><h1>Extra time</h1><p>Which device do you want extra time on? An admin will see the jobs you've done in the last 12 hours.</p></div></div>
     <div class="ask-devices">${ASK_DEVICES.map(([d, icon]) => `<button class="ask-device" data-a="ask-time" data-id="${d}"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true">${icon}</svg>${d}</button>`).join('')}</div>
     <h2 class="sec" style="margin-top:28px">Your requests</h2>${asks}`;
 }
@@ -1279,18 +1350,24 @@ document.addEventListener('click', e => {
   else if (a === 'ask-time') call('POST', 'device-asks', { device: id }).then(() => toast(`Sent. An admin has been asked about your ${id}.`)).catch(e => toast(e.message));
   else if (a === 'ask-yes' || a === 'ask-no') call('POST', `device-asks/${encodeURIComponent(id)}/answer`, { yes: a === 'ask-yes' }).catch(writeFailed);
   else if (a === 'out-open') openOuting(S.outings.get(id) || {});
+  else if (a === 'out-new') openOuting({ from: b.dataset.date || localToday() });
+  else if (a === 'event-new') openEvent({ date: b.dataset.date || localToday() });
+  else if (a === 'add-pick') openAddPicker(b.dataset.date || localToday());
+  else if (a === 'pay-ok') { b.disabled = true; call('POST', `pay/${encodeURIComponent(id)}/approve`, {}).then(() => toast('Approved. They have been told.')).catch(writeFailed); }
+  else if (a === 'pay-snooze') { b.disabled = true; call('POST', `pay/${encodeURIComponent(id)}/snooze`, {}).then(() => toast('Snoozed until tomorrow at 9am.')).catch(writeFailed); }
+  else if (a === 'pay-edit') openPayEdit(id);
   else if (a === 'out-del') { closeSheet(); call('DELETE', `outings/${encodeURIComponent(id)}`).catch(writeFailed); }
   else if (a === 'extra-open') openExtraJob();
   else if (a === 'sick-new') openSick();
   else if (a === 'sick-again') call('POST', `sick/${encodeURIComponent(id)}`).then(() => toast('Paused for another 12 hours.')).catch(writeFailed);
   else if (a === 'sick-end') call('DELETE', `sick/${encodeURIComponent(id)}`).then(() => toast('Chores are back on.')).catch(writeFailed);
-  else if (a === 'night-new') openNight({});
+  else if (a === 'night-new') openNight(b.dataset.date ? { date: b.dataset.date } : {});
   else if (a === 'night-open') openNight(S.nights.get(id) || {});
   else if (a === 'night-del') { closeSheet(); call('DELETE', `nights/${encodeURIComponent(id)}`).catch(writeFailed); }
   else if (a === 'nt-del') call('DELETE', `night-types/${encodeURIComponent(id)}`).catch(writeFailed);
   else if (a === 'app-install') installApp();
   else if (a === 'dinner-open') openDinner(id);
-  else if (a === 'dinner-new') openDinner();
+  else if (a === 'dinner-new') { openDinner(); const f = document.getElementById('dn-date'); if (f && b.dataset.date && b.dataset.date >= localToday()) f.value = b.dataset.date; }
   else if (a === 'dtask-new') openDinnerTask({ dinner: id });
   else if (a === 'dtask-open') { const t = S.dinnerTasks.get(id); if (t) openDinnerTask(t); }
   else if (a === 'dtask-del') { closeSheet(); call('DELETE', `d/dinnerTasks/${encodeURIComponent(id)}`).catch(writeFailed); }
@@ -1596,6 +1673,12 @@ document.addEventListener('submit', async e => {
     go.disabled = true; go.textContent = 'Sending…';
     try { const photo = await uploadPhoto(file); closeSheet(); await complete(f.dataset.id, photo); }
     catch (err) { showFormError('pf-error', err.message); go.disabled = false; go.textContent = 'Send and tick off'; }
+  } else if (f.id === 'pay-form') {
+    const amount = document.getElementById('pay-amount').value, approve = e.submitter && e.submitter.value === 'approve';
+    try {
+      await call('POST', `pay/${encodeURIComponent(f.dataset.id)}/${approve ? 'approve' : 'edit'}`, { amount });
+      closeSheet(); toast(approve ? 'Approved. They have been told.' : 'Saved. Approve it when you are ready.');
+    } catch (err) { showFormError('pay-error', err.message); }
   } else if (f.id === 'review-form') {
     const go = document.getElementById('rv-go'), note = document.getElementById('rv-note').value.trim(), file = document.getElementById('rv-photo').files[0];
     if (!note && !file) return showFormError('rv-error', 'Add a note or a photo so they know what to fix.');
