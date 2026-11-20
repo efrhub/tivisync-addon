@@ -392,3 +392,20 @@ a.btn { display: inline-block; text-decoration: none; color: var(--ink); }
 .group-grid th, .group-grid td { padding: 6px 8px; text-align: center; border-bottom: 1px solid var(--line, rgba(127,127,127,.25)); }
 .group-grid th[scope=row], .group-grid thead th:first-child { text-align: left; font-weight: 500; white-space: nowrap; padding-right: 14px; }
 .group-grid input { width: 20px; height: 20px; margin: 0; }
+
+/* 3.2.0 layout */
+details.fold > summary { list-style: none; cursor: pointer; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary h2 { display: inline-flex; gap: 8px; align-items: baseline; }
+details.fold > summary h2::before { content: '▸'; font-size: .8em; transition: transform .15s; }
+details.fold[open] > summary h2::before { transform: rotate(90deg); }
+.needs-you { border: 2px solid #f3c64a; border-radius: 12px; padding: 12px 14px; background: #fffaf0; margin-bottom: 18px; }
+.add-opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin: 12px 0 4px; }
+.add-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 12px 14px; border: 1px solid #d6dcea; border-radius: 10px; background: #fff; cursor: pointer; font: inherit; }
+.add-opt:hover, .add-opt:focus-visible { border-color: #1f3a7a; background: #f3f6fc; }
+.add-opt span { font-size: .85em; color: #5b6475; }
+.chip.dinner { background: #fff2e0; border-color: #f5c58a; }
+.settings-block { margin-bottom: 28px; }
+#today-badge { background: #d6336c; }
+.pay-lines { margin: 6px 0 0; padding-left: 18px; font-size: .9em; color: #3d4556; }
+.pay-row .pills { align-self: center; flex-wrap: wrap; justify-content: flex-end; }
