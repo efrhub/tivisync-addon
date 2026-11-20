@@ -261,6 +261,7 @@ function mayReceive(memberId, event) {
   return true;
 }
 function broadcast(event) {
+  if (event.coll === 'shop') publishShopSoon();
   const line = `data: ${JSON.stringify(event)}\n\n`;
   for (const c of streams) {
     const session = db.sessions[c.key];
@@ -863,6 +864,25 @@ async function haService(domain, service, data) {
   const r = await fetch(`http://supervisor/core/api/services/${domain}/${service}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
   if (!r.ok) throw new Error(`Home Assistant answered ${r.status}`);
   return true;
+}
+/* Home Assistant sees the shopping list as sensor.family_planner_shopping_list, so automations can send it to phones
+ * (for example when someone arrives in town). State = items still to buy; attributes items[] and list (one per line).
+ * Sent whenever the list changes and every 5 minutes, because Home Assistant forgets it after a restart. */
+let shopTimer = null;
+function shopForHa() {
+  const items = Object.values(db.shop).filter(i => !i.ordered).sort((a, b) => a.at - b.at)
+    .map(i => ((i.qty || 1) > 1 ? `${i.qty} × ${i.text}` : i.text));
+  return { state: String(items.length), attributes: { items, list: items.map(t => `• ${t}`).join('\n'), friendly_name: 'Family Planner shopping list', icon: 'mdi:cart', unit_of_measurement: 'items' } };
+}
+async function publishShop() {
+  const token = process.env.SUPERVISOR_TOKEN;
+  if (!token) return;
+  const r = await fetch('http://supervisor/core/api/states/sensor.family_planner_shopping_list', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(shopForHa()), signal: AbortSignal.timeout(5000) });
+  if (!r.ok) throw new Error(`Home Assistant answered ${r.status}`);
+}
+function publishShopSoon() {
+  if (shopTimer) return;
+  shopTimer = setTimeout(() => { shopTimer = null; publishShop().catch(e => console.error('Shopping list to Home Assistant:', e.message)); }, 1000);
 }
 async function speakOverdue() {
   if (!SPEAKERS.size || !process.env.SUPERVISOR_TOKEN) return;
@@ -1888,6 +1908,8 @@ function start() {
   setInterval(() => speakOverdue().catch(e => console.error(e)), +process.env.ROTA_SPEAK_EVERY || 5 * 60 * 1000).unref();
   setInterval(() => tvReminders().catch(e => console.error(e)), +process.env.ROTA_TV_EVERY || 5 * 60 * 1000).unref();
   setInterval(() => tvDaily().catch(e => console.error(e)), +process.env.ROTA_TV_EVERY || 5 * 60 * 1000).unref();
+  setTimeout(publishShopSoon, 3000);
+  setInterval(publishShopSoon, 5 * 60 * 1000).unref();
   if (!process.env.NO_HA_LISTENER) setTimeout(startHaListener, 2000);
   if (SPEAKERS.size) console.log(`Spoken reminders on: ${[...SPEAKERS].map(([n, e]) => `${n} → ${e}`).join(', ')}`);
   setInterval(backup, 6 * 3600 * 1000).unref();
