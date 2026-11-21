@@ -27,6 +27,8 @@ When a child's TV time runs out they can ask for more on the TV. Adults get an a
 
 Family Planner uses the same alerts to check extra jobs, and adds TV time for chores that are done (event `tivisync_bonus` with `profile` and `minutes`).
 
+When a job is sent back its TV time is taken off until it's redone. If the time was given on an earlier day (or there isn't enough extra time left today), the rest is owed and the next TV time earned – normally the redo – pays it off first, so a returned job never gives its time twice (1.23.3). Owed time lapses after 7 days.
+
 ## Want to watch, watched and scores (1.10.0, app build 30)
 
 - **Want to watch:** on any film or series page press **＋ Want to watch**. Each profile has its own list, shown as a row on the Home screen on every TV. Films drop off the list once watched; series once every episode is watched.
