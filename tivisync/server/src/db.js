@@ -188,6 +188,9 @@ for (const sql of [
   'ALTER TABLE devices ADD COLUMN app_build TEXT',
   // TMDB genres per title ("Action|Comedy"; '' = none / not found) for the app's own Films / Series groups
   'ALTER TABLE title_ratings ADD COLUMN genres TEXT',
+  // TV time still owed for a Family Planner job sent back after its time was given on an earlier day (paid off by the redo)
+  'ALTER TABLE profiles ADD COLUMN owed_seconds INTEGER NOT NULL DEFAULT 0',
+  'ALTER TABLE profiles ADD COLUMN owed_at INTEGER',
 ]) {
   try { db.exec(sql); } catch { /* already exists */ }
 }
