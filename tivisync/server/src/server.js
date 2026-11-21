@@ -846,12 +846,25 @@ function earnBonus(ref, minutes, reason, name) {
   if (byName && (!p || String(p.name).trim().toLowerCase() !== String(name).trim().toLowerCase())) p = byName;
   if (!p) { weekStat('choreMissed', 1); console.warn(`TV time ${m > 0 ? '+' : ''}${m} min not added: no TiviSync profile matches "${ref}"${name ? ` / "${name}"` : ''}`); return null; }
   weekStat('choreOk', 1); if (m > 0) weekStat('choreMin', m);
+  /* A job sent back loses its time until it's redone. If the time was given on an earlier day (or today's extra
+   * time is already smaller), what can't be taken from today is owed, and the next time earned – normally the
+   * redo – pays that off first. So a returned job never ends up giving its time twice. Owed time lapses after 7 days. */
+  let owed = Number(p.owed_seconds) || 0;
+  if (owed && p.owed_at && now() - p.owed_at > 7 * 864e5) owed = 0;
+  let note = '';
   if (m < 0) {
     const u = db.prepare('SELECT bonus_seconds FROM usage_daily WHERE profile_id = ? AND day = ?').get(p.id, today());
-    const take = Math.min(-m * 60, u ? u.bonus_seconds : 0);
+    const take = Math.max(0, Math.min(-m * 60, u ? u.bonus_seconds : 0));
     if (take > 0) addBonus(p.id, -take / 60);
-  } else addBonus(p.id, m);
-  console.log(`TV time for ${p.name}: ${m > 0 ? '+' : ''}${m} min${reason ? ` (${reason})` : ''}`);
+    if (-m * 60 > take) { owed += -m * 60 - take; note = `, ${Math.round((-m * 60 - take) / 60)} min owed until it's redone`; }
+  } else {
+    const pay = Math.min(m * 60, owed);
+    owed -= pay;
+    if (m * 60 > pay) addBonus(p.id, (m * 60 - pay) / 60);
+    if (pay) note = `, ${Math.round(pay / 60)} min of it paid back time owed for a sent-back job`;
+  }
+  db.prepare('UPDATE profiles SET owed_seconds = ?, owed_at = ? WHERE id = ?').run(owed, owed ? (m < 0 ? now() : p.owed_at || now()) : null, p.id);
+  console.log(`TV time for ${p.name}: ${m > 0 ? '+' : ''}${m} min${reason ? ` (${reason})` : ''}${note}`);
   return p;
 }
 
